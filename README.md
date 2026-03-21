@@ -49,7 +49,14 @@ The system supports advanced targeting beyond simple `master_person` attributes.
 
 **Multi-Table Support (`table_name`)**
 Criteria can now specify a `table_name`. The Query Builder dynamically joins these tables to `master_person`.
-*   *Example*: `table_name='clinical_data'`, `field='last_hba1c'`, `value='> 7'`.
+*   *Example*: `table_name='lab_result'`, `field='loinc_code'`, `value='4548-4'` (HbA1c).
+
+**External Data Integration**
+The engine connects to read-only external tables for rich segmentation:
+*   **Clinical**: `clinical_diagnosis` (ICD-10), `lab_result` (LOINC), `medication_prescription` (RxNorm/ATC), `vaccination_record` (CVX).
+*   **Claims**: `insurance_claim` and `claim_line_item` (CPT/HCPCS) for billing data.
+*   **Encounters**: `hospital_encounter` (Admissions, Surgeries) and `appointment_history`.
+*   **Risk & Social**: `risk_score` (ML models) and `social_determinants`.
 
 **Campaign Intrication (Ad-Hoc Filters)**
 Marketers can refine a base Segment for a specific campaign without creating a new permanent Segment.
