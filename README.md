@@ -1,0 +1,108 @@
+# Prompt Engine Architecture
+
+This document outlines the architecture and logic flow for the Health Services Prompt Engine. The system is designed to separate **Strategy** (Marketing/Clinical definitions) from **Execution** (Delivery, Consent, Frequency Capping).
+
+## 1. High-Level Logic Flow
+
+1.  **Definition**: Marketers/Admins define *Segments* (Who) and *Nudge Definitions* (What).
+2.  **Generation**:
+    *   **Campaigns**: A scheduled job runs, translates Segment Criteria into SQL, finds matching users, and inserts them into the `prompt_queue`.
+    *   **Automated Algorithms**: External clinical systems trigger events that insert rows directly into `prompt_queue`.
+3.  **Filtration (The Gatekeeper)**: Before sending, the system checks **Consent** (Opt-in) and **Frequency Caps** (Anti-spam).
+4.  **Delivery**: The message is sent via the appropriate channel provider.
+5.  **Feedback Loop**:
+    *   **Interaction**: User opens/clicks (logged in `interaction_log`).
+    *   **Action**: User performs the health action (logged in `customer_action_log`). This stops future reminders.
+
+---
+
+## 2. Dynamic SQL Generation (Segmentation)
+
+The `segment_criteria` table stores the rules that build the `WHERE` clause dynamically.
+
+**Table Structure Example:**
+| segment_id | field_name | operator | value | logic_group |
+|:---|:---|:---|:---|:---|
+| 101 | age | > | 45 | A |
+| 101 | has_asthma | = | true | A |
+| 101 | last_screening | < | NOW() - 2 months | B |
+
+**Logic:**
+To generate the target list for Segment 101:
+
+1.  Start with `SELECT id FROM master_person WHERE ...`
+2.  Iterate through criteria for `segment_id = 101`.
+3.  Construct the query:
+    ```sql
+    SELECT id, email, first_name 
+    FROM master_person 
+    WHERE 
+      (age > 45 AND has_asthma = true) -- Group A
+      AND 
+      (last_checkup_date < CURRENT_DATE - INTERVAL '2 months') -- Group B
+    ```
+4.  **Result**: A list of `person_id`s to insert into `prompt_queue`.
+
+### 2.1. Multi-Table & Campaign Intrication
+
+The system supports advanced targeting beyond simple `master_person` attributes.
+
+**Multi-Table Support (`table_name`)**
+Criteria can now specify a `table_name`. The Query Builder dynamically joins these tables to `master_person`.
+*   *Example*: `table_name='clinical_data'`, `field='last_hba1c'`, `value='> 7'`.
+
+**Campaign Intrication (Ad-Hoc Filters)**
+Marketers can refine a base Segment for a specific campaign without creating a new permanent Segment.
+*   **Base Segment**: "Seniors" (Age > 65)
+*   **Campaign Criteria**: "Has Asthma" (Ad-hoc filter)
+*   **Resulting Target**: `(Age > 65) AND (Has Asthma)`
+
+---
+
+## 3. The Prompt Queue & Lifecycle
+
+The `prompt_queue` is the central operational table. Every notification request lives here.
+
+**Status Transitions:**
+
+*   **PENDING**: Newly created.
+*   **SCHEDULED**: If `scheduled_for` is in the future, it waits here.
+*   **QUEUED**: Ready for processing. The "Dispatcher" picks these up.
+*   **PROCESSING CHECKS**:
+    1.  **Consent Check**: Query `channel_consent`. If false -> `SKIPPED_CONSENT`.
+    2.  **Frequency Check**: Query `frequency_cap_policy` vs recent history. If limit exceeded -> `SKIPPED_FREQUENCY`.
+    3.  **Action Check**: (For reminders) Check `customer_action_log`. If action done -> `CANCELLED_COMPLETED`.
+*   **SENT**: Successfully dispatched to provider (SendGrid, Twilio, etc.).
+*   **FAILED**: Provider returned an error.
+
+---
+
+## 4. Handling Reminders & Expiration
+
+Nudges are not just fire-and-forget; they have goals.
+
+*   **Nudge Goal**: Linked to `action_definition` (e.g., "Book Appointment").
+*   **Action Log**: When a user books an appointment, a record is written to `customer_action_log`.
+*   **Reminder Logic**:
+    *   A nightly job checks `prompt_queue` for sent nudges that have a `reminder_policy`.
+    *   It checks if the linked **Action** has been performed in `customer_action_log`.
+    *   **If NO**: It creates a new `prompt_queue` item (the reminder) scheduled for `now + delay`.
+    *   **If YES**: It does nothing (silence is golden).
+
+---
+
+## 5. Frequency Capping Algorithm
+
+To prevent user fatigue, we implement a "Token Bucket" or "Sliding Window" check.
+
+**Inputs:**
+*   `person_id`
+*   `channel` (e.g., Email)
+*   `category` (e.g., Marketing)
+
+**Check:**
+1.  Look up policy: `Max 2 Marketing Emails per 7 days`.
+2.  Count sent messages in `prompt_queue` for this person/channel/category in the last 7 days.
+3.  `Count < Max` ? **ALLOW** : **BLOCK**.
+
+*Note: Service/Transactional messages usually have a NULL policy or high limit, effectively bypassing this.*

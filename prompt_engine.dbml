@@ -1,0 +1,398 @@
+// Database Markup Language (DBML) for Prompt Engine
+// Use https://dbdiagram.io to visualize
+
+Project PromptEngine {
+  database_type: 'PostgreSQL'
+  Note: 'Data model for handling health service nudges, prompts, and notifications.'
+}
+
+// -----------------------------------------------------------------------------
+// EXTERNAL DATA (Read-Only Sources for Segmentation)
+// -----------------------------------------------------------------------------
+
+Table clinical_diagnosis {
+  person_id uuid [ref: > master_person.id]
+  icd_code varchar [note: "Standard ICD-10 code"]
+  diagnosis_date date
+  status varchar [note: "active, resolved"]
+}
+
+Table lab_result {
+  person_id uuid [ref: > master_person.id]
+  loinc_code varchar [note: "Standard LOINC code"]
+  test_name varchar
+  value_numeric float
+  unit varchar
+  test_date date
+}
+
+Table medication_prescription {
+  person_id uuid [ref: > master_person.id]
+  drug_code varchar [note: "RxNorm or ATC code"]
+  drug_name varchar
+  start_date date
+  end_date date
+  is_active boolean
+}
+
+Table insurance_coverage {
+  person_id uuid [ref: > master_person.id]
+  plan_name varchar
+  benefit_code varchar [note: "Code defining coverage benefits"]
+  coverage_start date
+  coverage_end date
+}
+
+Table insurance_claim {
+  id uuid [pk]
+  person_id uuid [ref: > master_person.id]
+  claim_date date
+  provider_id varchar
+  total_amount decimal
+  status varchar [note: "paid, pending, denied"]
+}
+
+Table claim_line_item {
+  claim_id uuid [ref: > insurance_claim.id]
+  procedure_code varchar [note: "CPT or HCPCS code"]
+  diagnosis_code varchar [note: "ICD code associated with line item"]
+  benefit_code varchar
+  service_date date
+}
+
+Table hospital_encounter {
+  id uuid [pk]
+  person_id uuid [ref: > master_person.id]
+  facility_id varchar
+  admission_date timestamp
+  discharge_date timestamp
+  encounter_type varchar [note: "inpatient, surgery, er"]
+  drg_code varchar [note: "Diagnosis Related Group"]
+  primary_procedure_code varchar
+  
+  Note: "Covers surgeries, hospitalizations, and ER visits."
+}
+
+Table vaccination_record {
+  person_id uuid [ref: > master_person.id]
+  vaccine_code varchar [note: "CVX or CPT code"]
+  vaccine_name varchar
+  administered_date date
+  status varchar
+}
+
+Table appointment_history {
+  person_id uuid [ref: > master_person.id]
+  specialty varchar [note: "Cardiology, GP, etc."]
+  provider_id varchar
+  visit_date date
+  status varchar [note: "completed, no-show, scheduled"]
+}
+
+Table risk_score {
+  person_id uuid [ref: > master_person.id]
+  model_name varchar [note: "e.g., 'Readmission Risk', 'Diabetes Risk'"]
+  score_value float
+  calculated_at date
+}
+
+Table social_determinants {
+  person_id uuid [ref: > master_person.id]
+  category varchar [note: "Transportation, Housing, Food Security"]
+  status varchar [note: "stable, at-risk, crisis"]
+  assessed_date date
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 1: CUSTOMER DATA & CONSENT (The Foundation)
+// -----------------------------------------------------------------------------
+
+Table master_person {
+  id uuid [pk, unique, note: "Unique identifier for the customer"]
+  first_name varchar
+  last_name varchar
+  date_of_birth date
+  gender varchar
+  email varchar
+  phone varchar
+  // Other PII and clinical summary fields used for segmentation
+  last_checkup_date date
+  has_asthma boolean
+  created_at timestamp
+  
+  Note: "The central customer table. In reality, segmentation might query this + clinical tables."
+}
+
+Enum channel_type {
+  email
+  push_notification
+  sms
+  in_app_message
+}
+
+Table channel_consent {
+  person_id uuid [ref: > master_person.id]
+  channel channel_type
+  is_consented boolean [default: false]
+  updated_at timestamp
+  
+  indexes {
+    (person_id, channel) [unique]
+  }
+  Note: "Manages opt-in/opt-out per channel."
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 2: PROMPT CREATION & SEGMENTATION (Marketing / Configuration)
+// -----------------------------------------------------------------------------
+
+Table segment {
+  id integer [pk, increment]
+  name varchar
+  description text
+  created_by varchar
+  created_at timestamp
+  
+  Note: "Represents a 'Persona' or target audience defined by marketing."
+}
+
+// The building blocks for the "Dynamic SQL"
+// Example: Field='age', Operator='>', Value='45'
+Table segment_criteria {
+  id integer [pk, increment]
+  segment_id integer [ref: > segment.id]
+  table_name varchar [default: 'master_person', note: "Table to query (e.g. master_person, clinical_data)"]
+  field_name varchar [note: "Column name in the specified table"]
+  operator varchar [note: "e.g., =, >, <, IN, IS_NULL"]
+  value varchar [note: "The threshold value"]
+  logic_group varchar [note: "For grouping AND/OR logic"]
+  
+  Note: "Stores the rules used to generate the dynamic SQL for targeting."
+}
+
+Enum nudge_category {
+  service [note: "Transactional, Mandatory (e.g., Appointment confirmed)"]
+  marketing [note: "Promotional, Optional (e.g., Screening reminder)"]
+  educational
+}
+
+Enum nudge_priority {
+  critical
+  high
+  normal
+  low
+}
+
+// Defines "What" we are sending
+Table nudge_definition {
+  id integer [pk, increment]
+  name varchar [unique]
+  category nudge_category
+  default_priority nudge_priority
+  validity_duration interval [note: "How long the nudge is valid before expiring"]
+  
+  // Logic for reminders
+  reminder_policy_id integer [ref: - reminder_policy.id, note: "Optional link to reminder logic"]
+  
+  Note: "Catalog of available nudges (e.g., 'Flu Shot Reminder', 'Cardiologist Referral')."
+}
+
+Table message_template {
+  id integer [pk, increment]
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  channel channel_type
+  subject_line varchar
+  body_content text [note: "Supports placeholders like {{first_name}}"]
+  
+  indexes {
+    (nudge_definition_id, channel) [unique]
+  }
+  Note: "Content for the nudge, specific to the channel."
+}
+
+Table campaign {
+  id integer [pk, increment]
+  name varchar
+  segment_id integer [ref: > segment.id, note: "The Base Persona (e.g. 'Old & Privileged')"]
+  nudge_definition_id integer [ref: > nudge_definition.id, note: "What to send"]
+  start_date timestamp
+  end_date timestamp
+  is_active boolean
+  schedule_cron varchar [note: "Frequency of the campaign run (e.g., Daily at 9am)"]
+  created_by varchar
+  created_at timestamp
+  
+  Note: "Binds a Persona to a Nudge. The engine targets: (Segment Members) AND (Campaign Criteria)."
+}
+
+// "Intrication Logic": specific rules for THIS campaign only
+// Example: Target = (Segment 'Old') AND (Has 'Asthma')
+Table campaign_criteria {
+  id integer [pk, increment]
+  campaign_id integer [ref: > campaign.id]
+  table_name varchar [default: 'master_person', note: "Table to query"]
+  field_name varchar [note: "e.g., 'has_asthma'"]
+  operator varchar [note: "e.g., '='"]
+  value varchar [note: "e.g., 'true'"]
+  logic_group varchar
+  
+  Note: "Ad-hoc filters applied ON TOP of the Base Segment."
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 3: PROMPT HANDLING (Orchestration & Queue)
+// -----------------------------------------------------------------------------
+
+Enum prompt_status {
+  pending [note: "Created but not yet processed"]
+  scheduled [note: "Waiting for scheduled_at time"]
+  queued [note: "Ready to send, waiting for dispatcher"]
+  sent
+  failed
+  expired [note: "Validity period passed before sending"]
+  skipped_consent [note: "User opted out"]
+  skipped_frequency [note: "User received too many messages"]
+  cancelled_completed [note: "User performed the action before nudge was sent"]
+}
+
+Enum prompt_source {
+  campaign_engine [note: "Generated via Segment/Campaign"]
+  automated_algo [note: "Triggered by external events/doctor comments"]
+  manual_override
+}
+
+// The core operational table (The "Queue")
+Table prompt_queue {
+  id uuid [pk]
+  person_id uuid [ref: > master_person.id]
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  campaign_id integer [ref: > campaign.id, note: "Nullable, if from algo"]
+  
+  // Execution details
+  source prompt_source
+  status prompt_status
+  channel channel_type
+  
+  // Timing
+  created_at timestamp [default: `now()`]
+  scheduled_for timestamp [note: "When it SHOULD be sent"]
+  expires_at timestamp [note: "Do not send after this date"]
+  sent_at timestamp
+  
+  // Payload
+  context_data jsonb [note: "Dynamic data for the template (e.g., doctor name, date)"]
+  
+  Note: "The unified stream of all prompts waiting to be sent or history of sent items."
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 4: GOVERNANCE & FEEDBACK (Frequency & Logic)
+// -----------------------------------------------------------------------------
+
+Table frequency_cap_policy {
+  id integer [pk]
+  channel channel_type [note: "Nullable = Global cap"]
+  category nudge_category [note: "Nullable = All categories"]
+  max_messages integer
+  time_window interval [note: "e.g., '7 days'"]
+  
+  Note: "Rules to prevent spamming. Ex: Max 1 Marketing email per 7 days."
+}
+
+Table reminder_policy {
+  id integer [pk]
+  name varchar [note: "e.g. 'Standard Follow-up'"]
+  initial_delay interval [note: "Time to wait after first nudge before checking action"]
+  subsequent_delay interval [note: "Time between reminders"]
+  max_reminders integer
+  
+  Note: "Defines the cadence of reminders. Completion of Action (in Nudge Goal) stops this."
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 5: ACTION TRACKING (Closing the Loop)
+// -----------------------------------------------------------------------------
+
+// Defines what the user is supposed to do
+Table action_definition {
+  id integer [pk, increment]
+  name varchar [note: "e.g., 'Book Cardiologist', 'Complete CRC Screening'"]
+  external_code varchar [note: "Code used in clinical systems"]
+  
+  Note: "The 'Goal' of a nudge."
+}
+
+// Links Nudge to a Goal (Action)
+Table nudge_goal {
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  action_definition_id integer [ref: > action_definition.id]
+  is_mandatory boolean [default: true]
+  completion_window interval [note: "Time given to complete action before reminder"]
+  
+  indexes {
+    (nudge_definition_id, action_definition_id) [pk]
+  }
+}
+
+// Log of actions actually performed by users (Ingested from Clinical Systems)
+Table customer_action_log {
+  id uuid [pk]
+  person_id uuid [ref: > master_person.id]
+  action_definition_id integer [ref: > action_definition.id]
+  performed_at timestamp
+  source_system varchar
+  meta_data jsonb
+  
+  indexes {
+    (person_id, action_definition_id)
+  }
+  Note: "Used to check if a reminder should be sent or cancelled."
+}
+
+// Feedback loop
+Table interaction_log {
+  id uuid [pk]
+  prompt_queue_id uuid [ref: > prompt_queue.id]
+  event_type varchar [note: "opened, clicked, converted"]
+  occurred_at timestamp
+  
+  Note: "Tracks effectiveness and closes the loop for reminders."
+}
+
+// -----------------------------------------------------------------------------
+// RELATIONSHIPS & GROUPS
+// -----------------------------------------------------------------------------
+
+TableGroup Creation_Module {
+  segment
+  segment_criteria
+  campaign
+  campaign_criteria
+  nudge_definition
+  message_template
+  nudge_goal
+  action_definition
+}
+
+TableGroup Handling_Module {
+  prompt_queue
+  channel_consent
+  frequency_cap_policy
+  reminder_policy
+  interaction_log
+  customer_action_log
+}
+
+TableGroup External_Data {
+  clinical_diagnosis
+  lab_result
+  medication_prescription
+  insurance_coverage
+  insurance_claim
+  claim_line_item
+  hospital_encounter
+  vaccination_record
+  appointment_history
+  risk_score
+  social_determinants
+}
