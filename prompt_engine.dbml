@@ -200,14 +200,15 @@ Table nudge_definition {
 Table message_template {
   id integer [pk, increment]
   nudge_definition_id integer [ref: > nudge_definition.id]
+  experiment_group_id integer [ref: > experiment_group.id, note: "Nullable. If set, this content is for a specific A/B variant."]
   channel channel_type
   subject_line varchar
   body_content text [note: "Supports placeholders like {{first_name}}"]
   
   indexes {
-    (nudge_definition_id, channel) [unique]
+    (nudge_definition_id, channel, experiment_group_id) [unique]
   }
-  Note: "Content for the nudge, specific to the channel."
+  Note: "Content for the nudge. Can be Default or Variant-specific."
 }
 
 Table campaign {
@@ -240,6 +241,39 @@ Table campaign_criteria {
 }
 
 // -----------------------------------------------------------------------------
+// MODULE 2b: EXPERIMENTATION (A/B Testing)
+// -----------------------------------------------------------------------------
+
+Enum experiment_status {
+  draft
+  active
+  paused
+  completed
+}
+
+Table experiment {
+  id integer [pk, increment]
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  name varchar
+  description text
+  start_date timestamp
+  end_date timestamp
+  status experiment_status
+  
+  Note: "Manages A/B tests or Holdout tests."
+}
+
+Table experiment_group {
+  id integer [pk, increment]
+  experiment_id integer [ref: > experiment.id]
+  name varchar [note: "e.g. 'Control', 'Variant A'"]
+  allocation_percent decimal [note: "Percentage of traffic (0-100)"]
+  is_control boolean [default: false, note: "If true, users in this group receive NO message (Holdout)"]
+  
+  Note: "The buckets for the experiment."
+}
+
+// -----------------------------------------------------------------------------
 // MODULE 3: PROMPT HANDLING (Orchestration & Queue)
 // -----------------------------------------------------------------------------
 
@@ -253,6 +287,7 @@ Enum prompt_status {
   skipped_consent [note: "User opted out"]
   skipped_frequency [note: "User received too many messages"]
   cancelled_completed [note: "User performed the action before nudge was sent"]
+  control_group [note: "User selected for Control Group (Holdout). Message suppressed."]
 }
 
 Enum prompt_source {
@@ -267,6 +302,7 @@ Table prompt_queue {
   person_id uuid [ref: > master_person.id]
   nudge_definition_id integer [ref: > nudge_definition.id]
   campaign_id integer [ref: > campaign.id, note: "Nullable, if from algo"]
+  experiment_group_id integer [ref: > experiment_group.id, note: "Nullable. Tracks A/B test assignment."]
   
   // Execution details
   source prompt_source
@@ -373,6 +409,8 @@ TableGroup Creation_Module {
   nudge_goal
   action_definition
   action_criteria
+  experiment
+  experiment_group
 }
 
 TableGroup Handling_Module {

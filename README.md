@@ -79,6 +79,21 @@ The engine checks if *any* record matches these criteria for the user.
 
 If a record is found matching these rules (AND logic), the Action is marked as **Completed**, and any pending reminders are cancelled.
 
+### 2.3. Experimentation (A/B Testing)
+
+The engine supports randomized controlled trials (RCTs) to measure effectiveness.
+
+**Structure:**
+*   **Experiment**: Linked to a `nudge_definition`. Defines the test period.
+*   **Groups**:
+    *   **Control (Holdout)**: Users assigned here get `status='control_group'`. **No message is sent**, but they are tracked to compare "Natural Action Rate" vs "Nudged Action Rate".
+    *   **Variants**: Users receive specific `message_template` versions (e.g., "Subject Line A" vs "Subject Line B").
+
+**Logic:**
+1.  During generation, the engine checks if an active Experiment exists for the Nudge.
+2.  It randomly assigns the user to a Group based on `allocation_percent`.
+3.  The assigned `experiment_group_id` is stamped on the `prompt_queue` record for analytics.
+
 ---
 
 ## 3. The Prompt Queue & Lifecycle
