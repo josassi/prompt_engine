@@ -12,7 +12,7 @@ This document outlines the architecture and logic flow for the Health Services P
 4.  **Delivery**: The message is sent via the appropriate channel provider.
 5.  **Feedback Loop**:
     *   **Interaction**: User opens/clicks (logged in `interaction_log`).
-    *   **Action**: User performs the health action (logged in `customer_action_log`). This stops future reminders.
+    *   **Action**: The system checks if the goal is met using `action_criteria` against external tables (e.g., "Did they book the appointment?").
 
 ---
 
@@ -78,7 +78,7 @@ The `prompt_queue` is the central operational table. Every notification request 
 *   **PROCESSING CHECKS**:
     1.  **Consent Check**: Query `channel_consent`. If false -> `SKIPPED_CONSENT`.
     2.  **Frequency Check**: Query `frequency_cap_policy` vs recent history. If limit exceeded -> `SKIPPED_FREQUENCY`.
-    3.  **Action Check**: (For reminders) Check `customer_action_log`. If action done -> `CANCELLED_COMPLETED`.
+    3.  **Action Check**: (For reminders) Evaluate `action_criteria` against external tables. If returns true -> `CANCELLED_COMPLETED`.
 *   **SENT**: Successfully dispatched to provider (SendGrid, Twilio, etc.).
 *   **FAILED**: Provider returned an error.
 
@@ -89,12 +89,12 @@ The `prompt_queue` is the central operational table. Every notification request 
 Nudges are not just fire-and-forget; they have goals.
 
 *   **Nudge Goal**: Linked to `action_definition` (e.g., "Book Appointment").
-*   **Action Log**: When a user books an appointment, a record is written to `customer_action_log`.
+*   **Action Criteria**: Defines what "Success" looks like dynamically (e.g., `table=appointment_history`, `status='completed'`).
 *   **Reminder Logic**:
     *   A nightly job checks `prompt_queue` for sent nudges that have a `reminder_policy`.
-    *   It checks if the linked **Action** has been performed in `customer_action_log`.
-    *   **If NO**: It creates a new `prompt_queue` item (the reminder) scheduled for `now + delay`.
-    *   **If YES**: It does nothing (silence is golden).
+    *   It executes the **Action Criteria** query for the user.
+    *   **If Result is EMPTY**: It creates a new `prompt_queue` item (the reminder).
+    *   **If Result EXISTS**: It does nothing (silence is golden).
 
 ---
 

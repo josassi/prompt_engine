@@ -313,13 +313,28 @@ Table reminder_policy {
 // MODULE 5: ACTION TRACKING (Closing the Loop)
 // -----------------------------------------------------------------------------
 
-// Defines what the user is supposed to do
+// Defines the "Goal" dynamically (Same logic as Segmentation)
+// Example: Goal "Completed Colonoscopy" = (Table: claim_line_item, Code: 45378)
 Table action_definition {
   id integer [pk, increment]
-  name varchar [note: "e.g., 'Book Cardiologist', 'Complete CRC Screening'"]
-  external_code varchar [note: "Code used in clinical systems"]
+  name varchar [note: "e.g., 'Book Cardiologist', 'Normal HbA1c'"]
+  description text
   
-  Note: "The 'Goal' of a nudge."
+  Note: "A container for the rules that define success."
+}
+
+// Logic to check if the action is complete
+// The engine runs this query for the user. If it returns rows, Action = Complete.
+Table action_criteria {
+  id integer [pk, increment]
+  action_definition_id integer [ref: > action_definition.id]
+  table_name varchar [note: "e.g. appointment_history, lab_result"]
+  field_name varchar [note: "e.g. status, value_numeric"]
+  operator varchar [note: "e.g. =, >, <"]
+  value varchar [note: "e.g. 'completed', '7.0'"]
+  logic_group varchar
+  
+  Note: "Dynamic rules to verify if the goal has been met."
 }
 
 // Links Nudge to a Goal (Action)
@@ -334,29 +349,14 @@ Table nudge_goal {
   }
 }
 
-// Log of actions actually performed by users (Ingested from Clinical Systems)
-Table customer_action_log {
-  id uuid [pk]
-  person_id uuid [ref: > master_person.id]
-  action_definition_id integer [ref: > action_definition.id]
-  performed_at timestamp
-  source_system varchar
-  meta_data jsonb
-  
-  indexes {
-    (person_id, action_definition_id)
-  }
-  Note: "Used to check if a reminder should be sent or cancelled."
-}
-
-// Feedback loop
+// Feedback loop (Interaction with the Nudge itself)
 Table interaction_log {
   id uuid [pk]
   prompt_queue_id uuid [ref: > prompt_queue.id]
   event_type varchar [note: "opened, clicked, converted"]
   occurred_at timestamp
   
-  Note: "Tracks effectiveness and closes the loop for reminders."
+  Note: "Tracks effectiveness (Open Rate, Click Rate). Actual 'Health Success' is computed via action_criteria."
 }
 
 // -----------------------------------------------------------------------------
@@ -372,6 +372,7 @@ TableGroup Creation_Module {
   message_template
   nudge_goal
   action_definition
+  action_criteria
 }
 
 TableGroup Handling_Module {
@@ -380,7 +381,6 @@ TableGroup Handling_Module {
   frequency_cap_policy
   reminder_policy
   interaction_log
-  customer_action_log
 }
 
 TableGroup External_Data {
