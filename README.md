@@ -45,7 +45,7 @@ The `segment_criteria` table stores the rules. The `segment` table now stores a 
     ```
 4.  **Result**: A list of `person_id`s to insert into `prompt_queue`.
 
-### 2.1. Multi-Table & Campaign Intrication
+### 2.1. Multi-Table & Unified Segmentation
 
 The system supports advanced targeting beyond simple `master_person` attributes.
 
@@ -60,11 +60,13 @@ The engine connects to read-only external tables for rich segmentation:
 *   **Encounters**: `hospital_encounter` (Admissions, Surgeries) and `appointment_history`.
 *   **Risk & Social**: `risk_score` (ML models) and `social_determinants`.
 
-**Campaign Intrication (Ad-Hoc Filters)**
-Marketers can refine a base Segment for a specific campaign without creating a new permanent Segment.
-*   **Base Segment**: "Seniors" (Age > 65)
-*   **Campaign Criteria**: "Has Asthma" (Ad-hoc filter)
-*   **Resulting Target**: `(Age > 65) AND (Has Asthma)`
+**Unified Segmentation (Ad-Hoc Filters)**
+Instead of separate "Campaign Criteria", the system uses a **Unified Segmentation Model**.
+*   Every Campaign points to a single `Segment`.
+*   **Library Segments**: Reusable Personas (e.g., "Seniors").
+*   **Ad-Hoc Segments**: If a campaign needs specific filtering, a new `Segment` is created with `type='campaign_ad_hoc'`.
+    *   This Ad-Hoc segment is defined as: `(Base Library Segment) AND (Ad-Hoc Rules)`.
+    *   This keeps the architecture clean: The Query Builder only ever resolves a Segment.
 
 ### 2.2. Segment Composition & Exclusion
 
@@ -98,7 +100,7 @@ Just like Segments, "Actions" (Goals) are defined by dynamic rules against the E
 
 If a record is found matching these rules, the Action is marked as **Completed**, and any pending reminders are cancelled.
 
-### 2.3. Experimentation (A/B Testing)
+### 2.4. Experimentation (A/B Testing)
 
 The engine supports randomized controlled trials (RCTs) to measure effectiveness.
 

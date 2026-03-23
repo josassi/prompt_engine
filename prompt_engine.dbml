@@ -146,15 +146,21 @@ Table channel_consent {
 // MODULE 2: PROMPT CREATION & SEGMENTATION (Marketing / Configuration)
 // -----------------------------------------------------------------------------
 
+Enum segment_type {
+  library [note: "Reusable Persona (e.g. 'Diabetics')"]
+  campaign_ad_hoc [note: "One-off filter specific to a campaign. Hidden from main library."]
+}
+
 Table segment {
   id integer [pk, increment]
   name varchar
+  type segment_type [default: 'library']
   description text
   logic_expression varchar [note: "Boolean logic using criteria labels. e.g. '(A AND B) OR C'. If null, defaults to ALL AND."]
   created_by varchar
   created_at timestamp
   
-  Note: "Represents a 'Persona' or target audience defined by marketing."
+  Note: "Represents a 'Persona' or target audience. Can be a reusable Library item or a hidden Campaign Ad-Hoc filter."
 }
 
 // The building blocks for the "Dynamic SQL"
@@ -218,34 +224,16 @@ Table message_template {
 Table campaign {
   id integer [pk, increment]
   name varchar
-  segment_id integer [ref: > segment.id, note: "The Base Persona (e.g. 'Old & Privileged')"]
+  segment_id integer [ref: > segment.id, note: "Points to the Target Audience (Library or Ad-Hoc)"]
   nudge_definition_id integer [ref: > nudge_definition.id, note: "What to send"]
   start_date timestamp
   end_date timestamp
   is_active boolean
   schedule_cron varchar [note: "Frequency of the campaign run (e.g., Daily at 9am)"]
-  logic_expression varchar [note: "Boolean logic for campaign_criteria (e.g. 'X AND Y')."]
   created_by varchar
   created_at timestamp
   
-  Note: "Binds a Persona to a Nudge. The engine targets: (Segment Members) AND (Campaign Criteria)."
-}
-
-// "Intrication Logic": specific rules for THIS campaign only
-// Example: Label='X', Target = (Segment 'Old') AND (Has 'Asthma')
-Table campaign_criteria {
-  id integer [pk, increment]
-  campaign_id integer [ref: > campaign.id]
-  label varchar [note: "Reference label (e.g. 'X')"]
-  table_name varchar [default: 'master_person', note: "Table to query"]
-  field_name varchar [note: "e.g., 'has_asthma'"]
-  operator varchar [note: "e.g., '='"]
-  value varchar [note: "e.g., 'true'"]
-  
-  // For Composition
-  child_segment_id integer [ref: > segment.id, note: "Reuse an existing segment as a filter criteria"]
-  
-  Note: "Ad-hoc filters applied ON TOP of the Base Segment."
+  Note: "Binds a Segment to a Nudge."
 }
 
 // -----------------------------------------------------------------------------
@@ -412,7 +400,6 @@ TableGroup Creation_Module {
   segment
   segment_criteria
   campaign
-  campaign_criteria
   nudge_definition
   message_template
   nudge_goal
