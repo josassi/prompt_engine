@@ -64,6 +64,21 @@ Marketers can refine a base Segment for a specific campaign without creating a n
 *   **Campaign Criteria**: "Has Asthma" (Ad-hoc filter)
 *   **Resulting Target**: `(Age > 65) AND (Has Asthma)`
 
+### 2.2. Action Criteria (Defining Success)
+
+Just like Segments, "Actions" (Goals) are defined by dynamic rules against the External Data, rather than static logs.
+
+**Example: Goal "Diabetic Screening Complete"**
+The engine checks if *any* record matches these criteria for the user.
+
+**Table Structure Example:**
+| action_id | table_name | field_name | operator | value |
+|:---|:---|:---|:---|:---|
+| 205 | lab_result | loinc_code | = | 4548-4 |
+| 205 | lab_result | value_numeric | < | 7.0 |
+
+If a record is found matching these rules (AND logic), the Action is marked as **Completed**, and any pending reminders are cancelled.
+
 ---
 
 ## 3. The Prompt Queue & Lifecycle
