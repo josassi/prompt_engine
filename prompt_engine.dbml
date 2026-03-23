@@ -168,6 +168,9 @@ Table segment_criteria {
   operator varchar [note: "e.g., =, >, <, IN, IS_NULL"]
   value varchar [note: "The threshold value"]
   
+  // For Composition (Nested Segments)
+  child_segment_id integer [ref: > segment.id, note: "If set, this criteria represents membership in another Segment"]
+  
   Note: "Stores the rules used to generate the dynamic SQL for targeting."
 }
 
@@ -238,6 +241,9 @@ Table campaign_criteria {
   field_name varchar [note: "e.g., 'has_asthma'"]
   operator varchar [note: "e.g., '='"]
   value varchar [note: "e.g., 'true'"]
+  
+  // For Composition
+  child_segment_id integer [ref: > segment.id, note: "Reuse an existing segment as a filter criteria"]
   
   Note: "Ad-hoc filters applied ON TOP of the Base Segment."
 }

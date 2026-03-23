@@ -21,18 +21,18 @@ This document outlines the architecture and logic flow for the Health Services P
 The `segment_criteria` table stores the rules. The `segment` table now stores a `logic_expression` (e.g., `(A OR B) AND C`) to combine them.
 
 **Table Structure Example:**
-| segment_id | label | field_name | operator | value |
-|:---|:---|:---|:---|:---|
-| 101 | A | age | > | 45 |
-| 101 | B | has_asthma | = | true |
-| 101 | C | last_screening | < | NOW() - 2 months |
+| segment_id | label | field_name | operator | value | child_segment_id |
+|:---|:---|:---|:---|:---|:---|
+| 101 | A | age | > | 45 | null |
+| 101 | B | has_asthma | = | true | null |
+| 101 | C | null | null | null | 50 (Seniors) |
 
-**Logic Expression:** `(A AND B) OR C`
+**Logic Expression:** `(A AND B) OR NOT C`
 
 **Generated Query Logic:**
 1.  Start with `SELECT id FROM master_person WHERE ...`
 2.  Iterate through criteria for `segment_id = 101`.
-3.  Construct the query:
+3.  Construct the query (conceptually):
     ```sql
     SELECT id, email, first_name 
     FROM master_person 
@@ -40,7 +40,7 @@ The `segment_criteria` table stores the rules. The `segment` table now stores a 
       (
         (age > 45 AND has_asthma = true) -- (A AND B)
         OR 
-        (last_checkup_date < CURRENT_DATE - INTERVAL '2 months') -- C
+        NOT (id IN (SELECT id FROM segment_50_view)) -- NOT C (Exclusion of nested segment)
       )
     ```
 4.  **Result**: A list of `person_id`s to insert into `prompt_queue`.
@@ -66,7 +66,23 @@ Marketers can refine a base Segment for a specific campaign without creating a n
 *   **Campaign Criteria**: "Has Asthma" (Ad-hoc filter)
 *   **Resulting Target**: `(Age > 65) AND (Has Asthma)`
 
-### 2.2. Action Criteria (Defining Success)
+### 2.2. Segment Composition & Exclusion
+
+The engine supports complex set operations including **Nesting** (Union/Intersection of Segments) and **Exclusion** (Negation).
+
+**Segment Composition (Nesting)**
+A criterion can now refer to another existing Segment via `child_segment_id` instead of a raw SQL condition.
+*   *Example*: Define a "Diabetes" segment. Then define a "High Risk Diabetes" segment as: `("Diabetes" Segment) AND (HbA1c > 9)`.
+*   This promotes reusability and consistency.
+
+**Exclusion (The 'NOT' Operator)**
+The `logic_expression` supports the `NOT` operator for exclusion.
+*   *Example*: Target users who have Asthma but are NOT in the "Seniors" segment.
+*   *Logic*: `A AND (NOT B)`
+    *   Criteria A: `has_asthma = true`
+    *   Criteria B: `child_segment_id = [ID of Seniors Segment]`
+
+### 2.3. Action Criteria (Defining Success)
 
 Just like Segments, "Actions" (Goals) are defined by dynamic rules against the External Data.
 
