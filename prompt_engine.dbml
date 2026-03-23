@@ -150,6 +150,7 @@ Table segment {
   id integer [pk, increment]
   name varchar
   description text
+  logic_expression varchar [note: "Boolean logic using criteria labels. e.g. '(A AND B) OR C'. If null, defaults to ALL AND."]
   created_by varchar
   created_at timestamp
   
@@ -157,15 +158,15 @@ Table segment {
 }
 
 // The building blocks for the "Dynamic SQL"
-// Example: Field='age', Operator='>', Value='45'
+// Example: Field='age', Operator='>', Value='45', Label='A'
 Table segment_criteria {
   id integer [pk, increment]
   segment_id integer [ref: > segment.id]
+  label varchar [note: "Reference label for logic_expression (e.g. 'A')"]
   table_name varchar [default: 'master_person', note: "Table to query (e.g. master_person, clinical_data)"]
   field_name varchar [note: "Column name in the specified table"]
   operator varchar [note: "e.g., =, >, <, IN, IS_NULL"]
   value varchar [note: "The threshold value"]
-  logic_group varchar [note: "For grouping AND/OR logic"]
   
   Note: "Stores the rules used to generate the dynamic SQL for targeting."
 }
@@ -220,6 +221,7 @@ Table campaign {
   end_date timestamp
   is_active boolean
   schedule_cron varchar [note: "Frequency of the campaign run (e.g., Daily at 9am)"]
+  logic_expression varchar [note: "Boolean logic for campaign_criteria (e.g. 'X AND Y')."]
   created_by varchar
   created_at timestamp
   
@@ -227,15 +229,15 @@ Table campaign {
 }
 
 // "Intrication Logic": specific rules for THIS campaign only
-// Example: Target = (Segment 'Old') AND (Has 'Asthma')
+// Example: Label='X', Target = (Segment 'Old') AND (Has 'Asthma')
 Table campaign_criteria {
   id integer [pk, increment]
   campaign_id integer [ref: > campaign.id]
+  label varchar [note: "Reference label (e.g. 'X')"]
   table_name varchar [default: 'master_person', note: "Table to query"]
   field_name varchar [note: "e.g., 'has_asthma'"]
   operator varchar [note: "e.g., '='"]
   value varchar [note: "e.g., 'true'"]
-  logic_group varchar
   
   Note: "Ad-hoc filters applied ON TOP of the Base Segment."
 }
@@ -355,6 +357,7 @@ Table action_definition {
   id integer [pk, increment]
   name varchar [note: "e.g., 'Book Cardiologist', 'Normal HbA1c'"]
   description text
+  logic_expression varchar [note: "Boolean logic for criteria (e.g. 'A OR B')."]
   
   Note: "A container for the rules that define success."
 }
@@ -364,11 +367,11 @@ Table action_definition {
 Table action_criteria {
   id integer [pk, increment]
   action_definition_id integer [ref: > action_definition.id]
+  label varchar [note: "Reference label (e.g. 'A')"]
   table_name varchar [note: "e.g. appointment_history, lab_result"]
   field_name varchar [note: "e.g. status, value_numeric"]
   operator varchar [note: "e.g. =, >, <"]
   value varchar [note: "e.g. 'completed', '7.0'"]
-  logic_group varchar
   
   Note: "Dynamic rules to verify if the goal has been met."
 }

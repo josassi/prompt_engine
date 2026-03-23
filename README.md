@@ -18,18 +18,18 @@ This document outlines the architecture and logic flow for the Health Services P
 
 ## 2. Dynamic SQL Generation (Segmentation)
 
-The `segment_criteria` table stores the rules that build the `WHERE` clause dynamically.
+The `segment_criteria` table stores the rules. The `segment` table now stores a `logic_expression` (e.g., `(A OR B) AND C`) to combine them.
 
 **Table Structure Example:**
-| segment_id | field_name | operator | value | logic_group |
+| segment_id | label | field_name | operator | value |
 |:---|:---|:---|:---|:---|
-| 101 | age | > | 45 | A |
-| 101 | has_asthma | = | true | A |
-| 101 | last_screening | < | NOW() - 2 months | B |
+| 101 | A | age | > | 45 |
+| 101 | B | has_asthma | = | true |
+| 101 | C | last_screening | < | NOW() - 2 months |
 
-**Logic:**
-To generate the target list for Segment 101:
+**Logic Expression:** `(A AND B) OR C`
 
+**Generated Query Logic:**
 1.  Start with `SELECT id FROM master_person WHERE ...`
 2.  Iterate through criteria for `segment_id = 101`.
 3.  Construct the query:
@@ -37,9 +37,11 @@ To generate the target list for Segment 101:
     SELECT id, email, first_name 
     FROM master_person 
     WHERE 
-      (age > 45 AND has_asthma = true) -- Group A
-      AND 
-      (last_checkup_date < CURRENT_DATE - INTERVAL '2 months') -- Group B
+      (
+        (age > 45 AND has_asthma = true) -- (A AND B)
+        OR 
+        (last_checkup_date < CURRENT_DATE - INTERVAL '2 months') -- C
+      )
     ```
 4.  **Result**: A list of `person_id`s to insert into `prompt_queue`.
 
@@ -66,18 +68,19 @@ Marketers can refine a base Segment for a specific campaign without creating a n
 
 ### 2.2. Action Criteria (Defining Success)
 
-Just like Segments, "Actions" (Goals) are defined by dynamic rules against the External Data, rather than static logs.
+Just like Segments, "Actions" (Goals) are defined by dynamic rules against the External Data.
 
 **Example: Goal "Diabetic Screening Complete"**
-The engine checks if *any* record matches these criteria for the user.
 
 **Table Structure Example:**
-| action_id | table_name | field_name | operator | value |
-|:---|:---|:---|:---|:---|
-| 205 | lab_result | loinc_code | = | 4548-4 |
-| 205 | lab_result | value_numeric | < | 7.0 |
+| action_id | label | table_name | field_name | operator | value |
+|:---|:---|:---|:---|:---|:---|
+| 205 | A | lab_result | loinc_code | = | 4548-4 |
+| 205 | B | lab_result | value_numeric | < | 7.0 |
 
-If a record is found matching these rules (AND logic), the Action is marked as **Completed**, and any pending reminders are cancelled.
+**Logic Expression:** `A AND B`
+
+If a record is found matching these rules, the Action is marked as **Completed**, and any pending reminders are cancelled.
 
 ### 2.3. Experimentation (A/B Testing)
 
