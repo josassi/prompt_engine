@@ -29,19 +29,6 @@ The `segment_criteria` table stores the rules. The `segment` table now stores a 
 
 **Logic Expression:** `(A AND B) OR C`
 
-### 2.1. Composition & Negation (Advanced Logic)
-
-The engine supports nesting segments and exclusion using `NOT`.
-
-**Composition (Nesting)**
-Criteria can now reference another Segment (`child_segment_id`).
-*   *Example*: Define "Vulnerable" segment. Then define "Vulnerable AND Diabetes".
-
-**Negation (Exclusion)**
-To exclude users (e.g., "No Diabetes Diagnosis"), define the positive criteria and negate it in the expression.
-*   **Criteria A**: Has Diabetes Diagnosis.
-*   **Expression**: `NOT A`
-
 **Generated Query Logic:**
 1.  Start with `SELECT id FROM master_person WHERE ...`
 2.  Iterate through criteria for `segment_id = 101`.
