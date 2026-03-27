@@ -12,7 +12,7 @@ This document outlines the architecture and logic flow for the Health Services P
 4.  **Delivery**: The message is sent via the appropriate channel provider.
 5.  **Feedback Loop**:
     *   **Interaction**: User opens/clicks (logged in `interaction_log`).
-    *   **Action**: The system checks if the goal is met using `action_criteria` against external tables (e.g., "Did they book the appointment?").
+    *   **Action**: The system checks if the goal is met using the `goal_segment_id` (e.g., "Did they book the appointment?").
 
 ---
 
@@ -84,21 +84,21 @@ The `logic_expression` supports the `NOT` operator for exclusion.
     *   Criteria A: `has_asthma = true`
     *   Criteria B: `child_segment_id = [ID of Seniors Segment]`
 
-### 2.3. Action Criteria (Defining Success)
+### 2.3. Goal Segments (Defining Success)
 
-Just like Segments, "Actions" (Goals) are defined by dynamic rules against the External Data.
+Just like "Personas", "Goals" are defined using the standard **Segment** structure (with `type='goal'`).
+*   **Unified Logic**: The system checks: *"Is the user a member of the Goal Segment?"*
+    *   If **YES** -> The Nudge is successful. Stop Reminders.
+    *   If **NO** -> Send Nudge / Continue Reminders.
 
 **Example: Goal "Diabetic Screening Complete"**
+This is just a Segment defined as: `(Table: lab_result, Code: 4548-4)` AND `(Value < 7.0)`.
 
-**Table Structure Example:**
-| action_id | label | table_name | field_name | operator | value |
-|:---|:---|:---|:---|:---|:---|
-| 205 | A | lab_result | loinc_code | = | 4548-4 |
-| 205 | B | lab_result | value_numeric | < | 7.0 |
+**Structure:**
+*   **Nudge Definition**: Points to `goal_segment_id`.
+*   **Completion Window**: Defined on `nudge_definition` (e.g., "User has 14 days to complete this").
 
-**Logic Expression:** `A AND B`
-
-If a record is found matching these rules, the Action is marked as **Completed**, and any pending reminders are cancelled.
+If a record is found matching these rules, the Nudge is marked as **Completed**, and any pending reminders are cancelled.
 
 ### 2.4. Experimentation (A/B Testing)
 
@@ -139,8 +139,8 @@ The `prompt_queue` is the central operational table. Every notification request 
 
 Nudges are not just fire-and-forget; they have goals.
 
-*   **Nudge Goal**: Linked to `action_definition` (e.g., "Book Appointment").
-*   **Action Criteria**: Defines what "Success" looks like dynamically (e.g., `table=appointment_history`, `status='completed'`).
+*   **Nudge Goal**: Linked to `segment` (type='goal').
+*   **Goal Logic**: Defines what "Success" looks like dynamically (e.g., `table=appointment_history`, `status='completed'`).
 *   **Reminder Logic**:
     *   A nightly job checks `prompt_queue` for sent nudges that have a `reminder_policy`.
     *   It executes the **Action Criteria** query for the user.

@@ -149,6 +149,7 @@ Table channel_consent {
 Enum segment_type {
   library [note: "Reusable Persona (e.g. 'Diabetics')"]
   campaign_ad_hoc [note: "One-off filter specific to a campaign. Hidden from main library."]
+  goal [note: "Defines a success criteria (e.g. 'Completed Screening')"]
 }
 
 Table segment {
@@ -160,7 +161,7 @@ Table segment {
   created_by varchar
   created_at timestamp
   
-  Note: "Represents a 'Persona' or target audience. Can be a reusable Library item or a hidden Campaign Ad-Hoc filter."
+  Note: "Represents a 'Persona' or target audience. Can be a reusable Library item, a hidden Campaign Ad-Hoc filter, or a Goal."
 }
 
 // The building blocks for the "Dynamic SQL"
@@ -200,6 +201,10 @@ Table nudge_definition {
   category nudge_category
   default_priority nudge_priority
   validity_duration interval [note: "How long the nudge is valid before expiring"]
+  
+  // Goal / Action Tracking
+  goal_segment_id integer [ref: > segment.id, note: "The condition that marks this nudge as successful/completed"]
+  goal_completion_window interval [note: "Time given to complete action before reminder"]
   
   // Logic for reminders
   reminder_policy_id integer [ref: - reminder_policy.id, note: "Optional link to reminder logic"]
@@ -345,43 +350,6 @@ Table reminder_policy {
 // MODULE 5: ACTION TRACKING (Closing the Loop)
 // -----------------------------------------------------------------------------
 
-// Defines the "Goal" dynamically (Same logic as Segmentation)
-// Example: Goal "Completed Colonoscopy" = (Table: claim_line_item, Code: 45378)
-Table action_definition {
-  id integer [pk, increment]
-  name varchar [note: "e.g., 'Book Cardiologist', 'Normal HbA1c'"]
-  description text
-  logic_expression varchar [note: "Boolean logic for criteria (e.g. 'A OR B')."]
-  
-  Note: "A container for the rules that define success."
-}
-
-// Logic to check if the action is complete
-// The engine runs this query for the user. If it returns rows, Action = Complete.
-Table action_criteria {
-  id integer [pk, increment]
-  action_definition_id integer [ref: > action_definition.id]
-  label varchar [note: "Reference label (e.g. 'A')"]
-  table_name varchar [note: "e.g. appointment_history, lab_result"]
-  field_name varchar [note: "e.g. status, value_numeric"]
-  operator varchar [note: "e.g. =, >, <"]
-  value varchar [note: "e.g. 'completed', '7.0'"]
-  
-  Note: "Dynamic rules to verify if the goal has been met."
-}
-
-// Links Nudge to a Goal (Action)
-Table nudge_goal {
-  nudge_definition_id integer [ref: > nudge_definition.id]
-  action_definition_id integer [ref: > action_definition.id]
-  is_mandatory boolean [default: true]
-  completion_window interval [note: "Time given to complete action before reminder"]
-  
-  indexes {
-    (nudge_definition_id, action_definition_id) [pk]
-  }
-}
-
 // Feedback loop (Interaction with the Nudge itself)
 Table interaction_log {
   id uuid [pk]
@@ -389,7 +357,7 @@ Table interaction_log {
   event_type varchar [note: "opened, clicked, converted"]
   occurred_at timestamp
   
-  Note: "Tracks effectiveness (Open Rate, Click Rate). Actual 'Health Success' is computed via action_criteria."
+  Note: "Tracks effectiveness (Open Rate, Click Rate). Actual 'Health Success' is computed via the linked Goal Segment."
 }
 
 // -----------------------------------------------------------------------------
@@ -402,9 +370,6 @@ TableGroup Creation_Module {
   campaign
   nudge_definition
   message_template
-  nudge_goal
-  action_definition
-  action_criteria
   experiment
   experiment_group
 }
