@@ -129,7 +129,7 @@ The `prompt_queue` is the central operational table. Every notification request 
 *   **PROCESSING CHECKS**:
     1.  **Consent Check**: Query `channel_consent`. If false -> `SKIPPED_CONSENT`.
     2.  **Frequency Check**: Query `frequency_cap_policy` vs recent history. If limit exceeded -> `SKIPPED_FREQUENCY`.
-    3.  **Action Check**: (For reminders) Evaluate `action_criteria` against external tables. If returns true -> `CANCELLED_COMPLETED`.
+    3.  **Goal Check**: Evaluate the **Goal Segment**. If user matches -> `CANCELLED_COMPLETED`.
 *   **SENT**: Successfully dispatched to provider (SendGrid, Twilio, etc.).
 *   **FAILED**: Provider returned an error.
 
