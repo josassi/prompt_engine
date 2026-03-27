@@ -12,7 +12,7 @@ This document outlines the architecture and logic flow for the Health Services P
 4.  **Delivery**: The message is sent via the appropriate channel provider.
 5.  **Feedback Loop**:
     *   **Interaction**: User opens/clicks (logged in `interaction_log`).
-    *   **Action**: The system checks if the goal is met using the `goal_segment_id` (e.g., "Did they book the appointment?").
+    *   **Action**: The system checks if the goal is met using the `goal_segment_id`. If met, subsequent steps in the workflow are cancelled.
 
 ---
 
@@ -135,17 +135,25 @@ The `prompt_queue` is the central operational table. Every notification request 
 
 ---
 
-## 4. Handling Reminders & Expiration
+## 4. Nudge Workflows (Reminders & Sequences)
 
-Nudges are not just fire-and-forget; they have goals.
+Nudges are not just single messages; they are **Sequences of Steps**.
 
-*   **Nudge Goal**: Linked to `segment` (type='goal').
-*   **Goal Logic**: Defines what "Success" looks like dynamically (e.g., `table=appointment_history`, `status='completed'`).
-*   **Reminder Logic**:
-    *   A nightly job checks `prompt_queue` for sent nudges that have a `reminder_policy`.
-    *   It executes the **Action Criteria** query for the user.
-    *   **If Result is EMPTY**: It creates a new `prompt_queue` item (the reminder).
-    *   **If Result EXISTS**: It does nothing (silence is golden).
+**Structure:**
+*   **Nudge Definition**: The container (e.g., "Flu Shot Campaign"). Links to the **Goal Segment**.
+*   **Nudge Steps**: Ordered sequence of interactions.
+    *   **Step 1** (Order=1, Delay=0): Initial Email.
+    *   **Step 2** (Order=2, Delay=3 days): Follow-up SMS.
+    *   **Step 3** (Order=3, Delay=2 days): Final Push Notification.
+
+**Execution Logic:**
+1.  **Trigger**: User enters the Target Segment -> System schedules **Step 1**.
+2.  **Step Completion**: When Step 1 is sent, the System checks for Step 2.
+3.  **Scheduling**: System calculates `Scheduled Time = NOW + Step 2 Delay`.
+4.  **Goal Check (The Circuit Breaker)**:
+    *   Before sending *any* step, the system checks the **Goal Segment**.
+    *   **If User in Goal Segment** -> **CANCEL** entire remaining workflow (Success!).
+    *   **If NOT in Goal Segment** -> **SEND** the step.
 
 ---
 
