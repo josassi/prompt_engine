@@ -104,6 +104,26 @@ Table social_determinants {
 }
 
 // -----------------------------------------------------------------------------
+// INCOMING SIGNALS (Event Triggers)
+// -----------------------------------------------------------------------------
+
+Table clinical_recommendation {
+  id uuid [pk]
+  person_id uuid [ref: > master_person.id]
+  recommendation_type varchar [note: "e.g. 'cardio_review_6m'"]
+  
+  // The specific context for THIS recommendation
+  source_doctor_name varchar
+  visit_date date
+  recommended_action_date date
+  
+  processed boolean [default: false]
+  created_at timestamp
+  
+  Note: "Signals extracted from clinical notes/events to trigger nudges."
+}
+
+// -----------------------------------------------------------------------------
 // MODULE 1: CUSTOMER DATA & CONSENT (The Foundation)
 // -----------------------------------------------------------------------------
 
@@ -194,6 +214,11 @@ Enum nudge_priority {
   low
 }
 
+Enum trigger_type {
+  segment_membership [note: "Standard: User enters a Persona (e.g. Diabetics)"]
+  event_trigger [note: "Transactional: Reacts to a specific signal (e.g. Recommendation)"]
+}
+
 // Defines "What" we are sending
 Table nudge_definition {
   id integer [pk, increment]
@@ -201,6 +226,10 @@ Table nudge_definition {
   category nudge_category
   default_priority nudge_priority
   validity_duration interval [note: "How long the nudge is valid before expiring"]
+
+  // Trigger Logic
+  trigger_type trigger_type [default: 'segment_membership']
+  trigger_event_type varchar [note: "If event_trigger, matches clinical_recommendation.type"]
   
   // Goal / Action Tracking
   goal_segment_id integer [ref: > segment.id, note: "The condition that marks this nudge as successful/completed"]
@@ -234,6 +263,43 @@ Table message_template {
     (nudge_step_id, experiment_group_id) [unique]
   }
   Note: "Content for a specific Step. Can be Default or Variant-specific."
+}
+
+// -----------------------------------------------------------------------------
+// MODULE 2b: DATA CONTEXT (Dynamic Variables)
+// -----------------------------------------------------------------------------
+
+Enum source_lookup_type {
+  trigger_event [note: "Use the data from the clinical_recommendation that triggered this"]
+  master_person [note: "Directly from the person profile"]
+  latest_history [note: "The most recent past record (e.g. Last Lab Result)"]
+  upcoming_event [note: "The next future record (e.g. Next Appointment)"]
+}
+
+Table nudge_data_source {
+  id integer [pk, increment]
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  alias varchar [note: "Internal name to reference this source (e.g. 'target_visit')"]
+  
+  lookup_type source_lookup_type
+  table_name varchar [note: "e.g. 'appointment_history'"]
+  
+  // Filtering & Selection Logic (for Database Lookups)
+  filter_criteria_json jsonb [note: "e.g. {'specialty': 'Cardiology', 'status': 'completed'}"]
+  date_column varchar [note: "Column used for sorting/finding latest (e.g. 'visit_date')"]
+  
+  Note: "Defines a specific record to fetch data from (e.g. 'The Last Cardiology Visit')."
+}
+
+Table template_variable {
+  id integer [pk, increment]
+  nudge_definition_id integer [ref: > nudge_definition.id]
+  name varchar [note: "The placeholder name used in body_content (e.g. 'visit_date')"]
+  
+  nudge_data_source_id integer [ref: > nudge_data_source.id, note: "Which source does this variable come from?"]
+  column_name varchar [note: "e.g. 'visit_date' or 'source_doctor_name'"]
+  
+  Note: "Resolves {{name}} to a specific value from a defined Data Source."
 }
 
 Table campaign {
@@ -315,6 +381,7 @@ Table prompt_queue {
   nudge_step_id integer [ref: > nudge_step.id, note: "Which step of the workflow is this?"]
   campaign_id integer [ref: > campaign.id, note: "Nullable, if from algo"]
   experiment_group_id integer [ref: > experiment_group.id, note: "Nullable. Tracks A/B test assignment."]
+  clinical_recommendation_id uuid [ref: > clinical_recommendation.id, note: "Nullable. If triggered by an event, links to the source signal."]
   
   // Execution details
   source prompt_source
@@ -374,6 +441,8 @@ TableGroup Creation_Module {
   message_template
   experiment
   experiment_group
+  nudge_data_source
+  template_variable
 }
 
 TableGroup Handling_Module {
@@ -395,4 +464,5 @@ TableGroup External_Data {
   appointment_history
   risk_score
   social_determinants
+  clinical_recommendation
 }

@@ -5,9 +5,9 @@ This document outlines the architecture and logic flow for the Health Services P
 ## 1. High-Level Logic Flow
 
 1.  **Definition**: Marketers/Admins define *Segments* (Who) and *Nudge Definitions* (What).
-2.  **Generation**:
-    *   **Campaigns**: A scheduled job runs, translates Segment Criteria into SQL, finds matching users, and inserts them into the `prompt_queue`.
-    *   **Automated Algorithms**: External clinical systems trigger events that insert rows directly into `prompt_queue`.
+2.  **Generation & Triggers**:
+    *   **Segment-Based (Pull)**: A scheduled job runs, translates Segment Criteria into SQL, finds matching users, and inserts them into the `prompt_queue` (e.g., "All Diabetics").
+    *   **Event-Based (Push)**: External clinical systems insert signals (e.g., "Doctor Recommendation") into `clinical_recommendation`. The engine reacts immediately, triggering specific Nudges.
 3.  **Filtration (The Gatekeeper)**: Before sending, the system checks **Consent** (Opt-in) and **Frequency Caps** (Anti-spam).
 4.  **Delivery**: The message is sent via the appropriate channel provider.
 5.  **Feedback Loop**:
@@ -16,7 +16,11 @@ This document outlines the architecture and logic flow for the Health Services P
 
 ---
 
-## 2. Dynamic SQL Generation (Segmentation)
+## 2. Targeting & Triggers
+
+The system supports two main ways to target users: **Segmentation** (Criteria-based) and **Events** (Signal-based).
+
+### 2.0. Segmentation Logic (The "Pull" Model)
 
 The `segment_criteria` table stores the rules. The `segment` table now stores a `logic_expression` (e.g., `(A OR B) AND C`) to combine them.
 
@@ -114,6 +118,97 @@ The engine supports randomized controlled trials (RCTs) to measure effectiveness
 1.  During generation, the engine checks if an active Experiment exists for the Nudge.
 2.  It randomly assigns the user to a Group based on `allocation_percent`.
 3.  The assigned `experiment_group_id` is stamped on the `prompt_queue` record for analytics.
+
+### 2.5. Event-Driven Triggers (Clinical Signals)
+
+For scenarios requiring immediate action based on a specific event (e.g., "Doctor just recommended a cardio review"), we use **Event Triggers**.
+
+**The Signal Table: `clinical_recommendation`**
+External systems (NLP, EHR Integration) insert rows here.
+*   **Fields**: `person_id`, `recommendation_type` (e.g., 'cardio_review'), `source_doctor_name`, `visit_date`.
+
+**Execution:**
+1.  **Ingestion**: A new signal arrives in `clinical_recommendation`.
+2.  **Matching**: The engine finds active Nudge Definitions where `trigger_type='event_trigger'` and `trigger_event_type` matches the signal.
+3.  **Creation**: A `prompt_queue` item is created immediately, linked to this specific `clinical_recommendation_id`.
+
+### 2.6. Data Context & Dynamic Variables
+
+To personalize messages with specific data (e.g., "Dr. House recommended..."), we use a **Source + Variable** model. This ensures data consistency (getting the Date and Doctor from the *same* visit).
+
+**1. Data Source (`nudge_data_source`)**
+Defines *which* record to pull data from.
+*   **Lookup Type** (from `source_lookup_type`): `trigger_event`, `master_person`, `latest_history`, `upcoming_event`.
+*   **Example**: Alias `source_event` -> Linked to the triggering `clinical_recommendation`.
+
+**2. Template Variables (`template_variable`)**
+Maps a placeholder to a specific column in the Source.
+*   `{{doc_name}}` -> Source: `source_event`, Column: `source_doctor_name`
+*   `{{visit_date}}` -> Source: `source_event`, Column: `visit_date`
+
+#### 2.6.1. Resolution Algorithm (How the engine builds `context_data`)
+
+At send time (or at queue-insert time if you prefer pre-materialization), the engine resolves placeholders by building a dictionary `context_data`.
+
+**Inputs**
+1.  The `prompt_queue` row (contains `person_id`, `nudge_definition_id`, `clinical_recommendation_id`, etc.)
+2.  The `nudge_definition` row (mainly for IDs; trigger logic already happened earlier)
+3.  All `nudge_data_source` rows for this `nudge_definition_id`
+4.  All `template_variable` rows for this `nudge_definition_id`
+
+**Output**
+- A JSON-like map: `context_data[variable.name] = resolved_value`
+
+**Step A — Preload sources**
+1.  Load all sources `S = SELECT * FROM nudge_data_source WHERE nudge_definition_id = prompt_queue.nudge_definition_id`.
+2.  For each source `s in S`, resolve it into exactly **one** record (or `NULL` if not found): `resolved_source_records[s.alias]`.
+
+**Step B — Resolve variables**
+1.  Load all variables `V = SELECT * FROM template_variable WHERE nudge_definition_id = prompt_queue.nudge_definition_id`.
+2.  For each variable `v in V`:
+    *   Find its source: `s = resolved_source_records[alias_of(v.nudge_data_source_id)]`.
+    *   Read the column: `value = s[v.column_name]`.
+    *   Store: `context_data[v.name] = value`.
+
+#### 2.6.2. Source Resolution Rules (per `lookup_type`)
+
+**Case 1: `lookup_type = master_person` (marketing personalization like `{{first_name}}`)**
+1.  Use `prompt_queue.person_id`.
+2.  Fetch one row:
+    *   `SELECT * FROM master_person WHERE id = prompt_queue.person_id`.
+3.  Store it as `resolved_source_records[s.alias]`.
+
+**Case 2: `lookup_type = trigger_event` (event-driven personalization like `{{visit_date}}`)**
+1.  Require `prompt_queue.clinical_recommendation_id`.
+2.  Fetch one row:
+    *   `SELECT * FROM clinical_recommendation WHERE id = prompt_queue.clinical_recommendation_id`.
+3.  Store it as `resolved_source_records[s.alias]`.
+
+**Case 3: `lookup_type = latest_history` (pull the most recent past record)**
+1.  Use `prompt_queue.person_id`.
+2.  Query the table specified by `s.table_name`.
+3.  Apply filters from `s.filter_criteria_json`.
+4.  Sort by `s.date_column DESC`.
+5.  Take `LIMIT 1`.
+
+**Case 4: `lookup_type = upcoming_event` (pull the next future record)**
+1.  Use `prompt_queue.person_id`.
+2.  Query the table specified by `s.table_name`.
+3.  Apply filters from `s.filter_criteria_json`.
+4.  Filter by `s.date_column >= NOW()`.
+5.  Sort by `s.date_column ASC`.
+6.  Take `LIMIT 1`.
+
+#### 2.6.3. Failure Handling & Safety Rules
+
+*   If a source cannot be resolved (no matching record), the engine should:
+    *   Set dependent variables to `NULL`, or
+    *   Fail the prompt with a clear reason (recommended for `trigger_event`, because the message would be misleading).
+*   If a variable refers to a column that does not exist in the resolved source, treat it as a configuration error (fail fast).
+*   For `trigger_event`, if `prompt_queue.clinical_recommendation_id` is `NULL`, treat it as a configuration / orchestration error.
+
+**Resulting Message:**
+"During your visit on **2023-10-10**, **Dr. House** recommended a review."
 
 ---
 
