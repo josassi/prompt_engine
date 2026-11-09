@@ -225,7 +225,7 @@ Table nudge_definition {
   name varchar [unique]
   category nudge_category
   default_priority nudge_priority
-  validity_duration interval [note: "How long the nudge is valid before expiring"]
+  validity_duration interval [note: "Per MESSAGE: how long a queued step stays sendable after scheduled_for (sets prompt_queue.expires_at)"]
 
   // Trigger Logic
   trigger_type trigger_type [default: 'segment_membership']
@@ -233,7 +233,7 @@ Table nudge_definition {
   
   // Goal / Action Tracking
   goal_segment_id integer [ref: > segment.id, note: "The condition that marks this nudge as successful/completed"]
-  goal_completion_window interval [note: "Time given to complete action before reminder"]
+  goal_completion_window interval [note: "Per ENROLLMENT: how long after enrolled_at the person has to reach the goal (sets nudge_enrollment.expires_at)"]
   
   Note: "Catalog of available nudges (e.g., 'Flu Shot Reminder', 'Cardiologist Referral')."
 }
@@ -354,50 +354,89 @@ Table experiment_group {
 // MODULE 3: PROMPT HANDLING (Orchestration & Queue)
 // -----------------------------------------------------------------------------
 
-Enum prompt_status {
-  pending [note: "Created but not yet processed"]
-  scheduled [note: "Waiting for scheduled_at time"]
-  queued [note: "Ready to send, waiting for dispatcher"]
-  sent
-  failed
-  expired [note: "Validity period passed before sending"]
-  skipped_consent [note: "User opted out"]
-  skipped_frequency [note: "User received too many messages"]
-  cancelled_completed [note: "User performed the action before nudge was sent"]
-  control_group [note: "User selected for Control Group (Holdout). Message suppressed."]
-}
-
-Enum prompt_source {
+Enum enrollment_source {
   campaign_engine [note: "Generated via Segment/Campaign"]
   automated_algo [note: "Triggered by external events/doctor comments"]
   manual_override
 }
 
-// The core operational table (The "Queue")
-Table prompt_queue {
+Enum enrollment_status {
+  active [note: "In progress: steps being sent, or all sent and still waiting for the goal within the window"]
+  completed [note: "Person entered the Goal Segment after enrolled_at. Remaining steps cancelled."]
+  exited [note: "Stopped early for a non-goal reason (e.g. left target segment, campaign deactivated, manual stop)"]
+  expired [note: "goal_completion_window passed without reaching the goal"]
+  control_group [note: "Holdout. No messages are ever queued, but goal attainment is still tracked."]
+}
+
+// One person's run through one Nudge Workflow (the "Journey")
+Table nudge_enrollment {
   id uuid [pk]
   person_id uuid [ref: > master_person.id]
   nudge_definition_id integer [ref: > nudge_definition.id]
+  campaign_id integer [ref: > campaign.id, note: "Nullable. Set when enrolled via a segment campaign."]
+  clinical_recommendation_id uuid [ref: > clinical_recommendation.id, note: "Nullable. Set when enrolled via an event trigger. Used by 'trigger_event' data sources."]
+  experiment_group_id integer [ref: > experiment_group.id, note: "Nullable. Assigned ONCE at enrollment; every step uses the same group."]
+
+  source enrollment_source
+  status enrollment_status [default: 'active']
+  current_step_order integer [note: "Last step that was queued (0 = none yet)"]
+
+  // Timing
+  enrolled_at timestamp [default: `now()`, note: "Anchor for the goal check: only goal evidence AFTER this counts"]
+  expires_at timestamp [note: "enrolled_at + nudge_definition.goal_completion_window"]
+  goal_met_at timestamp [note: "When the person was first detected in the Goal Segment"]
+  ended_at timestamp [note: "When status left 'active'"]
+
+  indexes {
+    (person_id, nudge_definition_id) [note: "Make this a UNIQUE partial index WHERE status IN ('active','control_group') to stop the same person being enrolled twice at once"]
+    (status, expires_at)
+  }
+
+  Note: "Parent of the prompt_queue rows for one person + one nudge. Holds the journey-level state: experiment assignment, goal attainment, and the dedup guard."
+}
+
+Enum prompt_status {
+  pending [note: "Created but not yet processed"]
+  scheduled [note: "Waiting for scheduled_for time"]
+  queued [note: "Ready to send, waiting for dispatcher"]
+  sent
+  failed
+  expired [note: "Message validity period passed before sending"]
+  skipped_consent [note: "User opted out of this channel"]
+  skipped_frequency [note: "User received too many messages"]
+  cancelled_completed [note: "Goal reached before this step was sent"]
+  cancelled_exited [note: "Enrollment ended (exited/expired) before this step was sent"]
+}
+
+// The core operational table (The "Queue"): one row per message attempt
+Table prompt_queue {
+  id uuid [pk]
+  enrollment_id uuid [ref: > nudge_enrollment.id, note: "The journey this message belongs to"]
   nudge_step_id integer [ref: > nudge_step.id, note: "Which step of the workflow is this?"]
-  campaign_id integer [ref: > campaign.id, note: "Nullable, if from algo"]
-  experiment_group_id integer [ref: > experiment_group.id, note: "Nullable. Tracks A/B test assignment."]
-  clinical_recommendation_id uuid [ref: > clinical_recommendation.id, note: "Nullable. If triggered by an event, links to the source signal."]
-  
-  // Execution details
-  source prompt_source
-  status prompt_status
+
+  // Denormalized from the enrollment / step so the hot-path checks (consent, frequency) need no joins
+  person_id uuid [ref: > master_person.id]
   channel channel_type
-  
+
+  // Execution details
+  status prompt_status
+
   // Timing
   created_at timestamp [default: `now()`]
-  scheduled_for timestamp [note: "When it SHOULD be sent"]
-  expires_at timestamp [note: "Do not send after this date"]
+  scheduled_for timestamp [note: "When it SHOULD be sent (previous step's sent_at + delay_interval)"]
+  expires_at timestamp [note: "scheduled_for + nudge_definition.validity_duration. Do not send after this."]
   sent_at timestamp
-  
+
   // Payload
-  context_data jsonb [note: "Dynamic data for the template (e.g., doctor name, date)"]
-  
-  Note: "The unified stream of all prompts waiting to be sent or history of sent items."
+  context_data jsonb [note: "Snapshot of the variables resolved at send time (e.g., doctor name, date)"]
+
+  indexes {
+    (enrollment_id, nudge_step_id) [unique]
+    (status, scheduled_for)
+    (person_id, channel, sent_at)
+  }
+
+  Note: "Delivery log: every message waiting to be sent, or already sent. Journey-level state lives on nudge_enrollment."
 }
 
 // -----------------------------------------------------------------------------
@@ -446,6 +485,7 @@ TableGroup Creation_Module {
 }
 
 TableGroup Handling_Module {
+  nudge_enrollment
   prompt_queue
   channel_consent
   frequency_cap_policy
