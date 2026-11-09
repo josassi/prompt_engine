@@ -435,3 +435,47 @@ To prevent user fatigue, we implement a "Token Bucket" or "Sliding Window" check
 - [ ] **Event-trigger deadline**: Decide whether event-triggered enrollments anchor `expires_at` to `clinical_recommendation.recommended_action_date + goal_completion_window` instead of `enrolled_at + goal_completion_window`.
 - [ ] **Segment versioning**: Snapshot `segment.definition` on each enrollment (`segment_version`), so analytics know which rules applied.
 - [ ] **Segment analytics**: `segment_snapshot` (segment, node id, computed_at, person count) written by the daily segment job.
+
+### Known Limitations
+
+**Top priorities:** #8 Re-enrollment loop, #1 Person lifecycle, #9 Nudge arbitration, #2 Consent per category, #14 Content versioning.
+
+#### Safety & Compliance
+- [ ] **1. Person lifecycle**: `master_person` has no deceased / inactive / merged status. Add `status` / `deceased_date` and a global suppression check before the goal check.
+- [ ] **2. Consent per category**: `channel_consent` is per channel only and overwrites history. Make it channel × category, append-only for audit.
+- [ ] **3. Missing consent default**: Define what "no consent row" means (opt-in vs opt-out), possibly different for service vs marketing.
+- [ ] **4. Sensitive content**: Templates can put a diagnosis in an SMS or a shared-inbox email. Add a sensitivity flag on `nudge_definition` restricting variables / channels.
+- [ ] **5. Quiet hours & time zone**: No person time zone or send windows per channel.
+- [ ] **6. Minors & proxies**: No guardian / caregiver concept; a child's nudge goes to the child's contact.
+- [ ] **7. Data retention**: `context_data` (health data) in `prompt_queue` and `interaction_log` is kept indefinitely. Define a retention policy.
+
+#### Journey Logic
+- [ ] **8. Re-enrollment loop**: An `expired` person is re-enrolled by the next segment run, forever. Add a `reenrollment_cooldown` and/or max enrollments per person per nudge.
+- [ ] **9. Nudge arbitration**: `default_priority` is unused; frequency caps are first-come-first-served, so a low-priority marketing message can block a critical one. Dispatch by priority; let service / critical bypass marketing caps.
+- [ ] **10. Shared goal attribution**: Two nudges with the same goal both record `completed`. Define an attribution rule.
+- [ ] **11. Exit criteria**: `exited` ("left the target segment") has no field or job defining when it is checked.
+- [ ] **12. Event triggers too narrow**: Only `clinical_recommendation` can trigger; no eligibility filter (minors, deceased); no idempotency key from the source system; `processed boolean` can't record partial failures when several nudges match.
+- [ ] **13. Event nudges can't be switched off**: Only `campaign` has `is_active` / dates; `nudge_definition` has no status.
+
+#### Content & Versioning
+- [ ] **14. Content versioning**: Editing steps / templates changes in-flight journeys. `prompt_queue` doesn't store `message_template_id` or the rendered content, so what was sent can't be proven.
+- [ ] **15. Language / locale**: No locale on `message_template`, no preferred language on the person, no locale-aware date formatting.
+- [ ] **16. Contact points**: No device-token table for push / in-app; no verified / bounced / invalid status on email and phone.
+
+#### Segmentation & Data
+- [ ] **17. Lab units**: Conditions on `value_numeric` ignore `unit` (HbA1c 7 % ≈ 53 mmol/mol). Require or normalize units.
+- [ ] **18. Value sets**: Clinical definitions use code lists with hundreds of codes. Add a `value_set` table and an `in_value_set` operator.
+- [ ] **19. Derived fields**: Examples use `age`, but only `date_of_birth` exists. The query builder needs computed fields.
+- [ ] **20. No PKs on external tables**: `lab_result`, `vaccination_record`, etc. have no id, so the record that satisfied a goal can't be referenced.
+- [ ] **21. Data freshness**: Nothing checks that external data was refreshed before the segment job runs.
+
+#### Operations & Scale
+- [ ] **22. Concurrency**: No claim / lock on `prompt_queue` (double sends) and frequency checks can race. Use `FOR UPDATE SKIP LOCKED` and a per-person lock.
+- [ ] **23. Delivery tracking**: No provider message id, error reason, retry count, or delivered / bounced receipts; `interaction_log.event_type` is free text.
+- [ ] **24. Segment computation cost**: Daily full recompute with nested segments inlined won't scale. Plan for materialized / incremental segments.
+- [ ] **25. Job logs & alerting**: No record of "segment job ran, enrolled N, failed M".
+
+#### Experimentation
+- [ ] **26. Assignment consistency**: Random per enrollment, so the same person can be control once and variant the next time. Use hash-based assignment on `person_id`.
+- [ ] **27. Allocation validation**: `allocation_percent` isn't checked to sum to 100.
+- [ ] **28. Global holdout**: No way to measure the whole program's effect, only per nudge.
