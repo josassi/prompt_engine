@@ -479,3 +479,5 @@ To prevent user fatigue, we implement a "Token Bucket" or "Sliding Window" check
 - [ ] **26. Assignment consistency**: Random per enrollment, so the same person can be control once and variant the next time. Use hash-based assignment on `person_id`.
 - [ ] **27. Allocation validation**: `allocation_percent` isn't checked to sum to 100.
 - [ ] **28. Global holdout**: No way to measure the whole program's effect, only per nudge.
+
+test
