@@ -6,7 +6,7 @@ This document outlines the architecture and logic flow for the Health Services P
 
 1.  **Definition**: Marketers/Admins define *Segments* (Who) and *Nudge Definitions* (What).
 2.  **Generation & Triggers**:
-    *   **Segment-Based (Pull)**: A scheduled job runs, translates Segment Criteria into SQL, finds matching users (e.g., "All Diabetics"), and creates a `nudge_enrollment` for each person not already enrolled.
+    *   **Segment-Based (Pull)**: A scheduled job runs, compiles the Segment definition tree into SQL, finds matching users (e.g., "All Diabetics"), and creates a `nudge_enrollment` for each person not already enrolled.
     *   **Event-Based (Push)**: External clinical systems insert signals (e.g., "Doctor Recommendation") into `clinical_recommendation`. The engine reacts immediately and creates a `nudge_enrollment` linked to the signal.
     *   For every new enrollment, the engine assigns the experiment group (once) and queues **Step 1** in `prompt_queue`.
 3.  **Filtration (The Gatekeeper)**: Before sending, the system checks the **Goal**, **Consent** (Opt-in) and **Frequency Caps** (Anti-spam).
@@ -32,40 +32,106 @@ The system supports two main ways to target users: **Segmentation** (Criteria-ba
 
 ### 2.0. Segmentation Logic (The "Pull" Model)
 
-The `segment_criteria` table stores the rules. The `segment` table now stores a `logic_expression` (e.g., `(A OR B) AND C`) to combine them.
+A segment's rules are stored as one **logic tree** in `segment.definition` (jsonb). The Query Builder walks the tree recursively and compiles it into SQL. There are no labels and no expression string to parse: the structure of the tree *is* the logic.
 
-**Table Structure Example:**
-| segment_id | label | field_name | operator | value | child_segment_id |
-|:---|:---|:---|:---|:---|:---|
-| 101 | A | age | > | 45 | null |
-| 101 | B | has_asthma | = | true | null |
-| 101 | C | null | null | null | 50 (Seniors) |
+**Node Types:**
 
-**Logic Expression:** `(A AND B) OR NOT C`
+| Node | Shape | Compiles to |
+|:---|:---|:---|
+| **and** | `{"id": "...", "and": [node, node, ...]}` | `(child AND child ...)` |
+| **or** | `{"id": "...", "or": [node, node, ...]}` | `(child OR child ...)` |
+| **not** | `{"id": "...", "not": node}` | `NOT (child)` |
+| **table leaf** | `{"id": "...", "table": "lab_result", "where": [...], "time": {...}}` | `EXISTS (SELECT 1 FROM lab_result_v x WHERE x.person_id = p.id AND <conditions> AND <time filter>)` |
+| **segment leaf** | `{"id": "...", "segment": 50}` | The compiled definition of segment 50 (nesting) |
 
-**Generated Query Logic:**
-1.  Start with `SELECT id FROM master_person WHERE ...`
-2.  Iterate through criteria for `segment_id = 101`.
-3.  Construct the query (conceptually):
-    ```sql
-    SELECT id, email, first_name 
-    FROM master_person 
-    WHERE 
-      (
-        (age > 45 AND has_asthma = true) -- (A AND B)
-        OR 
-        NOT (id IN (SELECT id FROM segment_50_view)) -- NOT C (Exclusion of nested segment)
-      )
-    ```
-4.  **Result**: A list of `person_id`s. Each one that has no `active` / `control_group` enrollment for this nudge gets a new `nudge_enrollment`.
+**Rules:**
+*   **Conditions in one leaf are ANDed on the same row.** `"where": [loinc_code = 4548-4, value_numeric < 7]` means *one* lab result that is an HbA1c **and** has a value under 7.
+*   **OR** is expressed with an `or` node, or with the `IN` operator inside one condition (`icd_code IN ('E10','E11')`).
+*   **`master_person` leaves** compile to plain conditions on `p` (no `EXISTS`), since it is the base table.
+*   **Every node has an `id`** (unique within the segment), so analytics can report per-node counts that stay stable when the tree is edited.
+*   **Values keep their JSON type** (`9` is a number, `"E11%"` a string), which avoids casting from varchar.
+
+**Time Filters (`time` on a table leaf):**
+All external tables are queried through views that expose a standard `event_date` column (see the convention at the top of `prompt_engine.dbml`).
+
+| `time.scope` | Filter | Allowed in |
+|:---|:---|:---|
+| `any_time` (default, or omit `time`) | none | All segments |
+| `within_last` + `window` | `x.event_date >= CURRENT_DATE - window` | All segments |
+| `since_enrollment` | `x.event_date BETWEEN e.enrolled_at::date AND e.expires_at::date` | Goal segments only (see 2.3) |
+
+`master_person` has no `event_date`, so its leaves cannot have a time filter.
+
+**Example: Segment 300 "Diabetes follow-up"**
+
+*Poorly controlled diabetics, **or** anyone without a flu shot in the last year.*
+
+```json
+{
+  "id": "root",
+  "or": [
+    { "id": "diabetic_uncontrolled",
+      "and": [
+        { "id": "A", "table": "clinical_diagnosis",
+          "where": [ {"field": "icd_code", "op": "LIKE", "value": "E11%"},
+                     {"field": "status",   "op": "=",    "value": "active"} ] },
+        { "id": "B", "table": "lab_result",
+          "where": [ {"field": "loinc_code",    "op": "=", "value": "4548-4"},
+                     {"field": "value_numeric", "op": ">", "value": 9} ],
+          "time": {"scope": "within_last", "window": "6 months"} }
+      ] },
+    { "id": "not_C",
+      "not":
+        { "id": "C", "table": "vaccination_record",
+          "where": [ {"field": "vaccine_code", "op": "=", "value": "141"},
+                     {"field": "status",       "op": "=", "value": "completed"} ],
+          "time": {"scope": "within_last", "window": "12 months"} } }
+  ]
+}
+```
+
+**Generated SQL:**
+```sql
+SELECT p.id
+FROM master_person p
+WHERE
+  (
+    EXISTS (SELECT 1 FROM clinical_diagnosis_v x            -- A
+            WHERE x.person_id = p.id
+              AND x.icd_code LIKE 'E11%'
+              AND x.status = 'active')
+    AND
+    EXISTS (SELECT 1 FROM lab_result_v x                    -- B
+            WHERE x.person_id = p.id
+              AND x.loinc_code = '4548-4'
+              AND x.value_numeric > 9
+              AND x.event_date >= CURRENT_DATE - INTERVAL '6 months')
+  )
+  OR
+  NOT EXISTS (SELECT 1 FROM vaccination_record_v x          -- NOT C
+              WHERE x.person_id = p.id
+                AND x.vaccine_code = '141'
+                AND x.status = 'completed'
+                AND x.event_date >= CURRENT_DATE - INTERVAL '12 months');
+```
+
+Note that `NOT C` negates the *whole row*: "no completed flu shot in the last 12 months", not "has some vaccination that isn't a flu shot".
+
+**Validation on Save:**
+1.  The tree matches the definition JSON Schema (node shapes, operators).
+2.  Every `table` and `field` is on the allowlist (see TODO: Dynamic SQL safety).
+3.  `since_enrollment` appears only in `type='goal'` segments, including through nested segments.
+4.  `segment_dependency` is rewritten from the `{"segment": N}` leaves; a save that would create a cycle is rejected.
+
+**Result**: A list of `person_id`s. Each one that has no `active` / `control_group` enrollment for this nudge gets a new `nudge_enrollment`.
 
 ### 2.1. Multi-Table & Unified Segmentation
 
 The system supports advanced targeting beyond simple `master_person` attributes.
 
-**Multi-Table Support (`table_name`)**
-Criteria can now specify a `table_name`. The Query Builder dynamically joins these tables to `master_person`.
-*   *Example*: `table_name='lab_result'`, `field='loinc_code'`, `value='4548-4'` (HbA1c).
+**Multi-Table Support**
+Each table leaf names its `table`. The Query Builder turns it into an `EXISTS` sub-query against that table's view, correlated on `person_id`.
+*   *Example*: `{"table": "lab_result", "where": [{"field": "loinc_code", "op": "=", "value": "4548-4"}]}` (has an HbA1c test).
 
 **External Data Integration**
 The engine connects to read-only external tables for rich segmentation:
@@ -74,12 +140,14 @@ The engine connects to read-only external tables for rich segmentation:
 *   **Encounters**: `hospital_encounter` (Admissions, Surgeries) and `appointment_history`.
 *   **Risk & Social**: `risk_score` (ML models) and `social_determinants`.
 
+Each is read through its `<table>_v` view, which adds `event_date`. The view is also the single place to adapt when a source system changes its columns.
+
 **Unified Segmentation (Ad-Hoc Filters)**
 Instead of separate "Campaign Criteria", the system uses a **Unified Segmentation Model**.
 *   Every Campaign points to a single `Segment`.
 *   **Library Segments**: Reusable Personas (e.g., "Seniors").
 *   **Ad-Hoc Segments**: If a campaign needs specific filtering, a new `Segment` is created with `type='campaign_ad_hoc'`.
-    *   This Ad-Hoc segment is defined as: `(Base Library Segment) AND (Ad-Hoc Rules)`.
+    *   Its definition is: `{"and": [{"segment": <base library segment>}, <ad-hoc rules>]}`.
     *   This keeps the architecture clean: The Query Builder only ever resolves a Segment.
 
 ### 2.2. Segment Composition & Exclusion
@@ -87,33 +155,62 @@ Instead of separate "Campaign Criteria", the system uses a **Unified Segmentatio
 The engine supports complex set operations including **Nesting** (Union/Intersection of Segments) and **Exclusion** (Negation).
 
 **Segment Composition (Nesting)**
-A criterion can now refer to another existing Segment via `child_segment_id` instead of a raw SQL condition.
-*   *Example*: Define a "Diabetes" segment. Then define a "High Risk Diabetes" segment as: `("Diabetes" Segment) AND (HbA1c > 9)`.
-*   This promotes reusability and consistency.
+A `segment` leaf refers to another existing Segment instead of raw conditions.
+*   *Example*: Define a "Diabetes" segment (id 40). Then define "High Risk Diabetes" as:
+    ```json
+    {"and": [ {"segment": 40},
+              {"table": "lab_result",
+               "where": [{"field": "loinc_code", "op": "=", "value": "4548-4"},
+                         {"field": "value_numeric", "op": ">", "value": 9}]} ]}
+    ```
+*   This promotes reusability and consistency. `segment_dependency` records that "High Risk Diabetes" uses segment 40, so segment 40 cannot be deleted while it is in use.
 
-**Exclusion (The 'NOT' Operator)**
-The `logic_expression` supports the `NOT` operator for exclusion.
-*   *Example*: Target users who have Asthma but are NOT in the "Seniors" segment.
-*   *Logic*: `A AND (NOT B)`
-    *   Criteria A: `has_asthma = true`
-    *   Criteria B: `child_segment_id = [ID of Seniors Segment]`
+**Exclusion (The `not` Node)**
+*   *Example*: Target users who have Asthma but are NOT in the "Seniors" segment (id 50):
+    ```json
+    {"and": [ {"table": "master_person", "where": [{"field": "has_asthma", "op": "=", "value": true}]},
+              {"not": {"segment": 50}} ]}
+    ```
 
 ### 2.3. Goal Segments (Defining Success)
 
 Just like "Personas", "Goals" are defined using the standard **Segment** structure (with `type='goal'`).
-*   **Unified Logic**: The system checks: *"Is the user a member of the Goal Segment?"*
+*   **Unified Logic**: The system checks: *"Has the user entered the Goal Segment since they were enrolled?"*
     *   If **YES** -> The Nudge is successful. Stop Reminders.
     *   If **NO** -> Send Nudge / Continue Reminders.
 
-**Example: Goal "Diabetic Screening Complete"**
-This is just a Segment defined as: `(Table: lab_result, Code: 4548-4)` AND `(Value < 7.0)`.
+**Example: Goal "HbA1c Under Control"**
+```json
+{ "id": "goal", "table": "lab_result",
+  "where": [ {"field": "loinc_code",    "op": "=", "value": "4548-4"},
+             {"field": "value_numeric", "op": "<", "value": 7.0} ],
+  "time": {"scope": "since_enrollment"} }
+```
 
 **Structure:**
 *   **Nudge Definition**: Points to `goal_segment_id`.
 *   **Completion Window**: `goal_completion_window` on `nudge_definition` (e.g., "User has 14 days to complete this"). At enrollment, `nudge_enrollment.expires_at = enrolled_at + goal_completion_window`.
 
 **Time-Bound Evaluation:**
-The goal is checked **relative to the enrollment**: only evidence dated after `nudge_enrollment.enrolled_at` counts. Otherwise an HbA1c test from three years ago would mark a brand-new enrollment as complete. (The query builder needs to know each criteria table's date column, e.g. `lab_result.test_date`, to apply this filter.)
+Goals are evaluated **per enrollment**, not per person. The compiled goal starts from `nudge_enrollment` so each person is checked against their *own* window:
+
+```sql
+SELECT e.id
+FROM nudge_enrollment e
+JOIN master_person p ON p.id = e.person_id
+WHERE e.nudge_definition_id = :nudge_id
+  AND e.status IN ('active', 'control_group')
+  AND EXISTS (SELECT 1 FROM lab_result_v x
+              WHERE x.person_id = e.person_id
+                AND x.loinc_code = '4548-4'
+                AND x.value_numeric < 7.0
+                AND x.event_date BETWEEN e.enrolled_at::date AND e.expires_at::date);
+```
+
+*   Only evidence **dated inside the window** counts. An HbA1c test from three years ago no longer marks a new enrollment as complete, and evidence after the window does not count either.
+*   Because the time filter sits in the same `EXISTS` as the conditions, the *same* lab result must be an HbA1c, be under 7, **and** fall inside the window.
+*   `since_enrollment` compares dates (`::date`), so a test done on the enrollment day itself counts.
+*   **People who already meet the goal at enrollment** should be excluded by the *target* segment, e.g. `Diabetics AND NOT (HbA1c < 7 within_last 3 months)`. This is a modelling convention, not an engine rule.
 
 **Outcome:**
 *   Goal met → `nudge_enrollment.status = 'completed'`, `goal_met_at` is set, and any not-yet-sent step is marked `cancelled_completed`.
@@ -283,7 +380,7 @@ Nudges are not just single messages; they are **Sequences of Steps**.
 1.  **Enrollment**: User enters the Target Segment (or a signal arrives) -> System creates a `nudge_enrollment` and queues **Step 1** (`current_step_order = 1`).
 2.  **Step Outcome**: When Step N reaches a final outcome (`SENT`, `FAILED`, `SKIPPED_CONSENT`, `SKIPPED_FREQUENCY`, `EXPIRED`), the System looks up Step N+1.
     *   A skipped step does **not** end the journey: the next step may use a different channel the person *has* consented to.
-3.  **Scheduling**: System inserts Step N+1 with `scheduled_for = (Step N sent_at, or the time it was skipped) + Step N+1 delay_interval`, and `expires_at = scheduled_for + validity_duration`.
+3.  **Scheduling**: System inserts Step N+1 with `scheduled_for = (Step N sent_at, or the time it was skipped) + Step N+1 delay_interval`, and `expires_at = LEAST(scheduled_for + Step N+1 message_ttl, enrollment expires_at)`, so no message is ever sent after the enrollment has expired.
     *   Because the next row is created only when the previous one finishes, delays are always measured from what actually happened, not from a guess made at enrollment time.
 4.  **Goal Check (The Circuit Breaker)**:
     *   Before sending *any* step, the system checks the **Goal Segment** (since `enrolled_at`).
@@ -296,8 +393,17 @@ Nudges are not just single messages; they are **Sequences of Steps**.
 | Field | Scope | Meaning |
 |:---|:---|:---|
 | `nudge_step.delay_interval` | Step | Wait after the previous step finished |
-| `nudge_definition.validity_duration` | Message | How long a queued step stays sendable (`prompt_queue.expires_at`) |
+| `nudge_step.message_ttl` | Message | How long a queued step stays sendable (`prompt_queue.expires_at`, capped at the enrollment's `expires_at`) |
 | `nudge_definition.goal_completion_window` | Enrollment | How long the person has to reach the goal (`nudge_enrollment.expires_at`) |
+
+```
+enrolled_at ─┬─ step1 ──delay──> step2 ──delay──> step3 ───────────────┬─ expires_at
+             │   └ttl┘            └ttl┘            └ttl┘                │
+             └─────────────────── goal_completion_window ───────────────┘
+                     goal evidence counts only inside this span
+```
+
+**Configuration Rule:** When a nudge is saved, `SUM(nudge_step.delay_interval) < goal_completion_window`. Otherwise the last steps could never be sent.
 
 ---
 
@@ -321,7 +427,11 @@ To prevent user fatigue, we implement a "Token Bucket" or "Sliding Window" check
 
 ## TODO
 
-- [ ] **Time-bound goal checks**: Only count goal evidence after `enrolled_at`, within `goal_completion_window`. Otherwise an old HbA1c test counts as success.
-- [ ] **Dynamic SQL safety**: Add an allowlist / metadata registry for `table_name` and `field_name` (`segment_criteria`, `nudge_data_source`) to prevent SQL injection and to cast `value` (stored as varchar) to the right type.
-- [ ] **Timing fields**: Give `validity_duration`, `goal_completion_window` and `nudge_step.delay_interval` clear, separate meanings.
-- [ ] **Check order**: Run the goal check before consent and frequency, so completions are recorded for opted-out users and nobody who already reached the goal is logged as a frequency skip.
+- [x] **Time-bound goal checks**: Goal segments use `"time": {"scope": "since_enrollment"}` and are evaluated per enrollment (`event_date BETWEEN enrolled_at AND expires_at`). See 2.0 and 2.3.
+- [ ] **Dynamic SQL safety**: Add an allowlist / metadata registry for the `table` and `field` names used in `segment.definition` and `nudge_data_source`, to prevent SQL injection and to validate value types.
+- [x] **Timing fields**: `delay_interval` (step), `message_ttl` (message, moved from `nudge_definition.validity_duration`), `goal_completion_window` (enrollment). See Section 4.
+- [x] **Check order**: Goal check runs before consent and frequency. See 3.2.
+- [ ] **Late-arriving data (`goal_data_lag`)**: Claims can arrive 30-90 days late with an earlier service date. Keep re-checking expired enrollments for a configurable lag and flip them to `completed` if evidence dated inside the window shows up.
+- [ ] **Event-trigger deadline**: Decide whether event-triggered enrollments anchor `expires_at` to `clinical_recommendation.recommended_action_date + goal_completion_window` instead of `enrolled_at + goal_completion_window`.
+- [ ] **Segment versioning**: Snapshot `segment.definition` on each enrollment (`segment_version`), so analytics know which rules applied.
+- [ ] **Segment analytics**: `segment_snapshot` (segment, node id, computed_at, person count) written by the daily segment job.

@@ -8,6 +8,24 @@ Project PromptEngine {
 
 // -----------------------------------------------------------------------------
 // EXTERNAL DATA (Read-Only Sources for Segmentation)
+//
+// EVENT_DATE CONVENTION: the engine never queries these tables directly. Each one
+// is exposed through a view `<table>_v` (e.g. lab_result_v) that adds a standard
+// `event_date` column = "the date the thing happened". Segment time filters
+// (within_last, since_enrollment) always use event_date.
+//
+//   clinical_diagnosis      -> diagnosis_date
+//   lab_result              -> test_date
+//   medication_prescription -> start_date
+//   insurance_coverage      -> coverage_start
+//   insurance_claim         -> claim_date
+//   claim_line_item         -> service_date
+//   hospital_encounter      -> admission_date
+//   vaccination_record      -> administered_date
+//   appointment_history     -> visit_date
+//   risk_score              -> calculated_at
+//   social_determinants     -> assessed_date
+//   master_person           -> (none: no time filter allowed)
 // -----------------------------------------------------------------------------
 
 Table clinical_diagnosis {
@@ -177,28 +195,23 @@ Table segment {
   name varchar
   type segment_type [default: 'library']
   description text
-  logic_expression varchar [note: "Boolean logic using criteria labels. e.g. '(A AND B) OR C'. If null, defaults to ALL AND."]
+  definition jsonb [note: "The full logic tree: and / or / not nodes, table leaves (table + where + optional time), segment leaves ({\"segment\": N}). See README 2.0."]
   created_by varchar
   created_at timestamp
-  
-  Note: "Represents a 'Persona' or target audience. Can be a reusable Library item, a hidden Campaign Ad-Hoc filter, or a Goal."
+
+  Note: "Represents a 'Persona' or target audience. Can be a reusable Library item, a hidden Campaign Ad-Hoc filter, or a Goal. The rules live in `definition`; the Query Builder compiles that tree into SQL."
 }
 
-// The building blocks for the "Dynamic SQL"
-// Example: Field='age', Operator='>', Value='45', Label='A'
-Table segment_criteria {
-  id integer [pk, increment]
-  segment_id integer [ref: > segment.id]
-  label varchar [note: "Reference label for logic_expression (e.g. 'A')"]
-  table_name varchar [default: 'master_person', note: "Table to query (e.g. master_person, clinical_data)"]
-  field_name varchar [note: "Column name in the specified table"]
-  operator varchar [note: "e.g., =, >, <, IN, IS_NULL"]
-  value varchar [note: "The threshold value"]
-  
-  // For Composition (Nested Segments)
-  child_segment_id integer [ref: > segment.id, note: "If set, this criteria represents membership in another Segment"]
-  
-  Note: "Stores the rules used to generate the dynamic SQL for targeting."
+// Derived from segment.definition on every save (one row per {"segment": N} leaf)
+Table segment_dependency {
+  segment_id integer [ref: > segment.id, note: "The parent segment"]
+  child_segment_id integer [ref: > segment.id, note: "A segment referenced inside the parent's definition"]
+
+  indexes {
+    (segment_id, child_segment_id) [pk]
+    child_segment_id
+  }
+  Note: "Real foreign keys for nested segments: blocks deleting a segment that is still used, enables cycle detection, and answers 'what uses this segment?'."
 }
 
 Enum nudge_category {
@@ -225,7 +238,6 @@ Table nudge_definition {
   name varchar [unique]
   category nudge_category
   default_priority nudge_priority
-  validity_duration interval [note: "Per MESSAGE: how long a queued step stays sendable after scheduled_for (sets prompt_queue.expires_at)"]
 
   // Trigger Logic
   trigger_type trigger_type [default: 'segment_membership']
@@ -233,8 +245,8 @@ Table nudge_definition {
   
   // Goal / Action Tracking
   goal_segment_id integer [ref: > segment.id, note: "The condition that marks this nudge as successful/completed"]
-  goal_completion_window interval [note: "Per ENROLLMENT: how long after enrolled_at the person has to reach the goal (sets nudge_enrollment.expires_at)"]
-  
+  goal_completion_window interval [note: "Per ENROLLMENT: how long after enrolled_at the person has to reach the goal (sets nudge_enrollment.expires_at). Must be longer than the sum of all step delay_intervals."]
+
   Note: "Catalog of available nudges (e.g., 'Flu Shot Reminder', 'Cardiologist Referral')."
 }
 
@@ -243,7 +255,8 @@ Table nudge_step {
   id integer [pk, increment]
   nudge_definition_id integer [ref: > nudge_definition.id]
   step_order integer [note: "1=Initial, 2=Reminder 1, 3=Reminder 2..."]
-  delay_interval interval [note: "Time to wait after the PREVIOUS step (0 for step 1)"]
+  delay_interval interval [note: "Per STEP: time to wait after the PREVIOUS step finished (0 for step 1)"]
+  message_ttl interval [note: "Per MESSAGE: how long this step stays sendable after scheduled_for (sets prompt_queue.expires_at, capped at nudge_enrollment.expires_at)"]
   channel channel_type [note: "Channel for this specific step"]
   
   indexes {
@@ -286,7 +299,7 @@ Table nudge_data_source {
   
   // Filtering & Selection Logic (for Database Lookups)
   filter_criteria_json jsonb [note: "e.g. {'specialty': 'Cardiology', 'status': 'completed'}"]
-  date_column varchar [note: "Column used for sorting/finding latest (e.g. 'visit_date')"]
+  date_column varchar [default: 'event_date', note: "Column used for sorting/finding latest. Defaults to the standard event_date; override only if needed."]
   
   Note: "Defines a specific record to fetch data from (e.g. 'The Last Cardiology Visit')."
 }
@@ -424,7 +437,7 @@ Table prompt_queue {
   // Timing
   created_at timestamp [default: `now()`]
   scheduled_for timestamp [note: "When it SHOULD be sent (previous step's sent_at + delay_interval)"]
-  expires_at timestamp [note: "scheduled_for + nudge_definition.validity_duration. Do not send after this."]
+  expires_at timestamp [note: "LEAST(scheduled_for + nudge_step.message_ttl, nudge_enrollment.expires_at). Do not send after this."]
   sent_at timestamp
 
   // Payload
@@ -473,7 +486,7 @@ Table interaction_log {
 
 TableGroup Creation_Module {
   segment
-  segment_criteria
+  segment_dependency
   campaign
   nudge_definition
   nudge_step
