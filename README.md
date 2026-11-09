@@ -461,6 +461,9 @@ To prevent user fatigue, we implement a "Token Bucket" or "Sliding Window" check
 - [ ] **14. Content versioning**: Editing steps / templates changes in-flight journeys. `prompt_queue` doesn't store `message_template_id` or the rendered content, so what was sent can't be proven.
 - [ ] **15. Language / locale**: No locale on `message_template`, no preferred language on the person, no locale-aware date formatting.
 - [ ] **16. Contact points**: No device-token table for push / in-app; no verified / bounced / invalid status on email and phone.
+- [ ] **29. Multi-channel steps**: A step has exactly one channel, so there is no channel fallback ("email, else SMS if no email consent"), no sending on several channels at once, and `message_template` has no channel-specific fields (push title, deep link, SMS length).
+    *   *Proposal*: New `nudge_step_channel` (`nudge_step_id`, `channel`, `priority`) replaces `nudge_step.channel`. `message_template` points to `nudge_step_channel_id` and gains `title` and `action_url`. `nudge_step.delivery_mode`: `fallback` (default: first channel in priority order that passes consent / frequency) or `all` (every channel that passes).
+    *   `prompt_queue.channel` records the channel actually used. With `all`, one step creates several rows, so the unique index becomes `(enrollment_id, nudge_step_id, channel)`.
 
 #### Segmentation & Data
 - [ ] **17. Lab units**: Conditions on `value_numeric` ignore `unit` (HbA1c 7 % ≈ 53 mmol/mol). Require or normalize units.
